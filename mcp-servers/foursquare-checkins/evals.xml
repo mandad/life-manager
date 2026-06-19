@@ -1,0 +1,59 @@
+<!--
+  Evaluation template for foursquare-checkins-mcp-server.
+
+  These questions exercise different combinations of the five tools and the kinds
+  of analysis you'd realistically ask of a check-in history. Because the answers
+  depend on YOUR personal data, every <answer> is a placeholder. To use this as a
+  real eval set:
+
+    1. Once the server is wired up with your OAuth token, run each question in a
+       Claude session.
+    2. Independently verify the answer by hand (e.g. via Swarm app history or by
+       querying the API directly).
+    3. Replace each placeholder <answer> with the verified value.
+
+  Then this file is a stable regression suite — re-run it after future changes
+  (model upgrades, server tweaks) to spot drift.
+-->
+<evaluation>
+  <qa_pair>
+    <question>How many total check-ins do I have on my Foursquare account?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the venue name and city of my very first check-in (oldest)?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In calendar year 2024, how many check-ins did I make? (UTC year boundaries: 1704067200 to 1735689599 inclusive.)</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the single venue I have checked in to the most times across my entire history? Return the venue name only.</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Of my 100 most recent check-ins, what is the most common short category name (e.g. "Coffee Shop", "Airport")?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>How many distinct cities appear across my 200 most recent check-ins?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the venue ID of my most recent airport check-in? (Look at the categories array for "Airport".)</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Among my 50 most recent check-ins, what is the highest single-check-in score (points awarded by Foursquare)?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What city does my Foursquare profile list as my home city?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Of my 100 most recent check-ins, how many included a non-empty "shout" (text comment from me)?</question>
+    <answer>__FILL_IN__</answer>
+  </qa_pair>
+</evaluation>

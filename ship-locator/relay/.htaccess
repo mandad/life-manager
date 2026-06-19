@@ -1,0 +1,5 @@
+# DreamHost is Apache 2.4. Only ship-relay.php should be reachable. Deny the DB, the config,
+# and any dotfiles directly. (Better still: keep $DB_FILE outside the web root entirely.)
+<FilesMatch "(\.db$|\.sqlite$|\.dat$|config\.php$|^\.)">
+    Require all denied
+</FilesMatch>
