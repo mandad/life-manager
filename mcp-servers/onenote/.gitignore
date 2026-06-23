@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.log
+# token cache must never be committed (it also lives outside OneDrive via ONENOTE_TOKEN_PATH)
+onenote-tokens.json
+.env

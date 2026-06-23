@@ -1,0 +1,32 @@
+{
+  "name": "onenote-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server exposing read-only Microsoft OneNote (via Graph API) for a personal Microsoft account; typed-text extraction + ink-page rendering for OCR",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "onenote-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "clean": "rimraf dist",
+    "auth": "node dist/auth.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "@napi-rs/canvas": "^1.0.0",
+    "axios": "^1.7.9",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
