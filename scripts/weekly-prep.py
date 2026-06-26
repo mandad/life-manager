@@ -29,6 +29,7 @@ VAULT = Path("AI Scratchpad")
 WEEKLY_DATA_DIR = VAULT / "Notes" / "_weekly-data"
 
 ALWAYS_CURRENT = {
+    "My Day.md",
     "Tasks.md",
     "Inbox.md",
     "Index.md",

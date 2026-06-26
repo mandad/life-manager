@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """defer-pick.py — Pick 1–2 Defer items to rotate into today's Today list.
 
-Reads the Defer table in `AI Scratchpad/Tasks.md`, scores each row by the
+Reads the Defer table in `AI Scratchpad/My Day.md`, scores each row by the
 rotation formula documented in `Notes/Daily update routine.md` Step 4:
 
     block-fit  >  effort × deadline-proximity  >  aging
@@ -30,7 +30,7 @@ import re
 import sys
 from pathlib import Path
 
-TASKS = Path("AI Scratchpad/Tasks.md")
+TASKS = Path("AI Scratchpad/My Day.md")
 
 # Effort token (case-insensitive) → minutes.
 EFFORT_MINUTES = {
@@ -238,7 +238,7 @@ def main() -> None:
     lines = TASKS.read_text(encoding="utf-8").splitlines()
     start, end = find_defer_section(lines)
     if start is None:
-        print("No Defer section found in Tasks.md", file=sys.stderr)
+        print("No Defer section found in My Day.md", file=sys.stderr)
         sys.exit(1)
 
     rows = parse_table(lines[start:end])

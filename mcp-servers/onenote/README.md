@@ -2,9 +2,12 @@
 
 Reads OneNote via Microsoft Graph for use in the LLM Land vault workflows (e.g. pulling JO 1:1 notes into Command Observations). Read-only (`Notes.Read`), device-code auth, **no client secret**.
 
-## Status
-- **Phase 1 (scaffolded, unbuilt-against-live):** list notebooks/sections/pages, get typed page text, search.
-- **Phase 2 (TODO):** `onenote_get_page_image` — render ink (InkML) → PNG for Claude to OCR handwriting.
+## Tools
+- `onenote_list_notebooks` / `onenote_list_sections` / `onenote_browse_notebook` / `onenote_list_pages` — navigation.
+- `onenote_get_page` — typed page text from the HTML. Flags `has_ink` and `has_images` (with an image manifest) so you know when a page's content is locked in handwriting or screenshots that the text extraction can't see.
+- `onenote_get_page_image` — render handwritten **ink** (InkML) → PNG tiles for vision-OCR.
+- `onenote_get_page_screenshots` — fetch a page's embedded **raster images** (screenshots, pasted pictures, diagrams) as PNG blocks for vision-OCR. OneNote OCRs images server-side but **never exposes that text** in the page HTML (img tags carry no `alt`/OCR attrs) or via `$search`, so fetching the binary and reading it with vision is the only way to recover a screenshot's text. Big images are downscaled to ~1568px to stay legible and small.
+- `onenote_search` — title/full-text search. Graph's native `$search` is rejected on this consumer account (`400 unsupported OData query parameters`) and the global `/me/onenote/pages` collection `400`s on accounts with many sections, so search **enumerates pages per-section and matches client-side** (AND of all terms, case-insensitive). Title-only by default; `deep=true` also scans page body text. The account is large (~190 sections / ~2300 pages) so an unscoped run is slow — pass `notebook` to scope to a notebook/section-group by name (and the only practical way to run a thorough `deep` search). Retries 429s with backoff (OneNote throttles hard). Caveat: **screenshot/image text is not matched** (not in the HTML) — open a hit with `onenote_get_page_screenshots`.
 
 ## Setup
 See **[SETUP.md](SETUP.md)**. Short version:

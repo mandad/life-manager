@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-whoop-refresh.py — reliable headless Whoop pull for /daily (automation #17).
+whoop-refresh.py — reliable headless Whoop pull for /daily (automation #17 + #18).
 
 Built 2026-06-17. Sidesteps the flaky Whoop MCP server: refreshes the stored
 access token (it has a ~1h TTL) via the refresh_token grant, then pulls recovery /
 sleep / cycle directly from the v2 API.
+
+Recovery date anchoring (#18, 2026-06-23): recovery is printed by the morning its
+underlying sleep ENDED (via recovery.sleep_id -> sleep.end), not by created_at —
+which mis-dated "today" by +1 and double-printed dates. Rows are deduped per morning
+(newest wins) and the current morning is tagged `[today]`. `--json` adds `_anchor_date`
+and `_is_today` to each recovery record. No more hand-reconciling which row is today.
 
 Why this path: the MCP server intermittently 500/400s, and even when up it does not
 reliably pick up an out-of-band token refresh. The refresh_token exchange is
@@ -122,14 +128,42 @@ def main():
         if isinstance(d, dict) and d.get("ERROR"):
             die(1, f"{label} pull failed {d['ERROR']}: {d['body']}")
 
+    # --- Recovery date anchoring (automation #18, 2026-06-23) ---
+    # WHOOP recovery.created_at is when the score was COMPUTED (often just after
+    # midnight UTC), which mis-dates "today's" recovery by +1 and can print two rows
+    # under one date. The morning a recovery represents = the date its underlying
+    # sleep ENDED. Anchor via recovery.sleep_id -> sleep.end, dedupe per morning
+    # (keep most-recently-updated), and tag the record for `today` (the query end date).
+    sleep_end_by_id = {r.get("id"): r.get("end", "")[:10]
+                       for r in slp.get("records", []) if not r.get("nap") and r.get("id")}
+
+    def rec_anchor(r):
+        return sleep_end_by_id.get(r.get("sleep_id")) or r.get("created_at", "")[:10]
+
+    by_anchor = {}  # anchor date -> recovery record (newest wins on a dup date)
+    for r in rec.get("records", []):
+        a_date = rec_anchor(r)
+        prev = by_anchor.get(a_date)
+        if prev is None or r.get("updated_at", "") > prev.get("updated_at", ""):
+            by_anchor[a_date] = r
+    today_str = end  # the morning we call "today" = the query's end date
+
     if a.json:
-        print(json.dumps({"recovery": rec.get("records", []), "sleep": slp.get("records", []), "cycle": cyc.get("records", [])}))
+        recs = []
+        for r in rec.get("records", []):
+            rr = dict(r)
+            rr["_anchor_date"] = rec_anchor(r)
+            rr["_is_today"] = rr["_anchor_date"] == today_str
+            recs.append(rr)
+        print(json.dumps({"recovery": recs, "sleep": slp.get("records", []), "cycle": cyc.get("records", [])}))
         return
 
-    print("=== RECOVERY (by morning) ===")
-    for r in sorted(rec.get("records", []), key=lambda x: x["created_at"]):
+    print("=== RECOVERY (by morning sleep ends) ===")
+    for a_date in sorted(by_anchor):
+        r = by_anchor[a_date]
         s = r.get("score", {})
-        print(f"{r['created_at'][:10]} | score {s.get('recovery_score')} | HRV {round(s.get('hrv_rmssd_milli',0),1)} | RHR {s.get('resting_heart_rate')} | SpO2 {round(s.get('spo2_percentage',0),1)}")
+        tag = "  [today]" if a_date == today_str else ""
+        print(f"{a_date} | score {s.get('recovery_score')} | HRV {round(s.get('hrv_rmssd_milli',0),1)} | RHR {s.get('resting_heart_rate')} | SpO2 {round(s.get('spo2_percentage',0),1)}{tag}")
     print("=== SLEEP (by end) ===")
     for r in sorted(slp.get("records", []), key=lambda x: x["end"]):
         if r.get("nap"):
