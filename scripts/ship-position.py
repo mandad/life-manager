@@ -7,8 +7,10 @@ payload is plaintext JSON; access is gated by a read token over HTTPS.
 
 Primary location source is the public mfphub AIS feed (https://mfphub.global/Ship/Read, no auth) —
 the relay isn't built yet. `--source auto` (default) pulls mfphub first and only drops to the relay
-if mfphub fails; `--source mfphub|relay` forces one. mfphub yields position/SOG/COG/heading only and
-has no time series, so `--history` is relay-only.
+if mfphub fails; `--source mfphub|relay` forces one. mfphub yields position + AIS nav status (under
+way / at anchor / moored) and has no time series, so `--history` is relay-only. Note: mfphub's
+`Speed` field is a nominal vessel speed, NOT live SOG (it reads 5–13 kt even at anchor), so it is
+deliberately not reported — real SOG/COG come from the relay or from differencing `--history` fixes.
 
 Weather (water temp, air temp, baro, wind) never comes from mfphub — AIS carries none. It comes only
 from the relay's ship-sensor obs or a NOAA SCS feed; absent both, use `nws_get_marine_forecast` at
@@ -41,6 +43,16 @@ MFPHUB_URL = "https://mfphub.global/Ship/Read"  # public NOAA/UNOLS AIS feed, no
 MFPHUB_NAME = "FAIRWEATHER"
 MFPHUB_MMSI = 369960000
 
+# AIS navigational status (ITU-R M.1371). mfphub's TrackHistory.Status carries this — the
+# trustworthy "is the ship moving" signal, unlike its Speed field (see fetch_mfphub).
+AIS_STATUS = {
+    0: "under way (engine)", 1: "at anchor", 2: "not under command",
+    3: "restricted manoeuvrability", 4: "constrained by draught", 5: "moored",
+    6: "aground", 7: "fishing", 8: "under way (sailing)", 9: "reserved",
+    11: "towing astern", 12: "towing alongside", 14: "AIS-SART/EPIRB", 15: "undefined",
+}
+UNDERWAY_STATUS = {0, 8}  # under way (engine) / under way (sailing) → Speed & COG are real SOG/COG
+
 
 def _conf_get(key):
     if CONF.exists():
@@ -70,7 +82,15 @@ def fetch_mfphub(name=MFPHUB_NAME, mmsi=MFPHUB_MMSI, url=MFPHUB_URL):
     """Latest AIS fix for the ship from the public mfphub feed, normalized to the relay's field shape.
 
     Feed is an array of host groups, each with a `Ships` list. Match by name substring (case-
-    insensitive) or MMSI. AIS sentinels (Course 360, Heading 511 = "not available") are nulled.
+    insensitive) or MMSI.
+
+    mfphub's `Speed`/`Course` are only reliable WHEN UNDER WAY. Empirically (2026-06-26) every
+    moored/anchored ship reports Speed 5–13 kt and not one of 169 ships reads 0–4 kt, so the field
+    floors and falsely shows motion at rest. But when actually transiting (>5 kt) the value is
+    correct. So we gate on AIS nav status (`TrackHistory.Status`: 0=under way, 1=at anchor,
+    5=moored, …): report Speed→SOG and Course→COG only when under way (status 0/8); suppress them
+    when anchored/moored/unknown. The decoded nav status is always returned (the movement signal).
+    AIS sentinels (Course 360, Heading 511 = "not available") are nulled.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "ship-position/1.0", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -81,13 +101,19 @@ def fetch_mfphub(name=MFPHUB_NAME, mmsi=MFPHUB_MMSI, url=MFPHUB_URL):
             if (want and want in (s.get("Name", "") or "").upper()) or (mmsi and s.get("MMSI") == mmsi):
                 cog = s.get("Course")
                 hdg = s.get("Heading")
+                status_code = (s.get("TrackHistory") or {}).get("Status")
+                nav_status = AIS_STATUS.get(status_code)  # None for 99/unknown/missing
+                underway = status_code in UNDERWAY_STATUS
                 return {
                     "lat": s.get("Latitude"),
                     "lon": s.get("Longitude"),
                     "utc": s.get("RecordDate"),
-                    "sog_kt": s.get("Speed"),
-                    "cog": None if cog in (360, None) else cog,
+                    # Speed/Course are real SOG/COG only under way; floored & bogus at rest, so gate.
+                    "sog_kt": s.get("Speed") if underway else None,
+                    "cog": cog if (underway and cog not in (360, None)) else None,
                     "heading": None if hdg in (511, None) else hdg,
+                    "nav_status": nav_status,
+                    "nav_status_code": status_code,
                     "mmsi": s.get("MMSI"),
                     "name": s.get("Name"),
                     "_source": "mfphub (public AIS)",
@@ -200,6 +226,8 @@ def main():
 
     lat, lon = data.get("lat"), data.get("lon")
     bits = []
+    if data.get("nav_status"):
+        bits.append(data["nav_status"])  # AIS nav status (mfphub) — the reliable movement signal
     for k, label, unit in (("sog_kt", "SOG", " kt"), ("cog", "COG", "°"), ("heading", "hdg", "°"),
                            ("wtmp", "water", ""), ("atmp", "air", ""), ("baro", "baro", ""), ("wspd", "wind", "")):
         if data.get(k) is not None:

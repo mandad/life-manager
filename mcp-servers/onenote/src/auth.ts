@@ -6,7 +6,9 @@
  * - `getAccessToken()` is imported by the MCP server: loads the cache and silently
  *   refreshes via the refresh_token when the access token is near expiry.
  *
- * No client secret (public client). Scopes: Notes.Read offline_access.
+ * No client secret (public client). Scopes: Notes.Read Notes.Create offline_access
+ * (read everything + create new pages/sections/notebooks; canNOT edit or delete existing notes —
+ * Notes.Create grants create-only, not modify/delete).
  * Token cache lives at ONENOTE_TOKEN_PATH (outside OneDrive), chmod 600, never printed.
  */
 
@@ -17,10 +19,12 @@ import axios from "axios";
 
 const TENANT = "consumers"; // personal Microsoft accounts
 const AUTH_BASE = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0`;
-// Fully-qualify to Graph so the token audience is graph.microsoft.com — the account
-// has Notes.Read consented on BOTH Graph and the legacy OneNote resource, and a bare
-// "Notes.Read" would be ambiguous (could mint a token for onenote.com → 401 on Graph).
-const SCOPES = "https://graph.microsoft.com/Notes.Read offline_access";
+// Fully-qualify each scope to Graph so the token audience is graph.microsoft.com — the account
+// has these consented on BOTH Graph and the legacy OneNote resource, and bare scope names would be
+// ambiguous (could mint a token for onenote.com → 401 on Graph). Notes.Create was added 2026-06-25
+// to allow page creation; re-consent (npm run auth) is required to pick up the new scope.
+const SCOPES =
+  "https://graph.microsoft.com/Notes.Read https://graph.microsoft.com/Notes.Create offline_access";
 const EXPIRY_SKEW_MS = 120_000; // refresh 2 min early
 
 interface TokenCache {

@@ -1,6 +1,6 @@
-# OneNote MCP (read-only, personal Microsoft account)
+# OneNote MCP (personal Microsoft account)
 
-Reads OneNote via Microsoft Graph for use in the LLM Land vault workflows (e.g. pulling JO 1:1 notes into Command Observations). Read-only (`Notes.Read`), device-code auth, **no client secret**.
+Reads OneNote via Microsoft Graph for use in the LLM Land vault workflows (e.g. pulling JO 1:1 notes into Command Observations). Scopes `Notes.Read` + `Notes.Create` (read everything + create new pages/sections/notebooks; **cannot edit or delete** existing notes), device-code auth, **no client secret**. All currently-exposed tools are read-only — `Notes.Create` was consented 2026-06-25 ahead of a write tool (`onenote_create_page`, not yet built).
 
 ## Tools
 - `onenote_list_notebooks` / `onenote_list_sections` / `onenote_browse_notebook` / `onenote_list_pages` — navigation.
@@ -11,7 +11,7 @@ Reads OneNote via Microsoft Graph for use in the LLM Land vault workflows (e.g. 
 
 ## Setup
 See **[SETUP.md](SETUP.md)**. Short version:
-1. Register a personal-account app (Azure portal → App registrations), enable public-client flows, add delegated `Notes.Read` + `offline_access`. Copy the **client ID**.
+1. Register a personal-account app (Azure portal → App registrations), enable public-client flows, add delegated `Notes.Read` + `Notes.Create` + `offline_access`. Copy the **client ID**.
 2. `npm install && npm run build`
 3. `ONENOTE_CLIENT_ID=<your-id> npm run auth` → device-code login (one time).
 4. Wire into `.claude/settings.local.json` (see below); restart Claude Code.
@@ -34,6 +34,6 @@ See **[SETUP.md](SETUP.md)**. Short version:
 ```
 
 ## Security
-- `Notes.Read` only — cannot modify/delete notes. No client secret exists.
+- `Notes.Read` + `Notes.Create` — can read all notes and create new pages/sections, but **cannot modify or delete** existing notes (Notes.Create is create-only; we deliberately avoid `Notes.ReadWrite`). No client secret exists.
 - Refresh token lives in `ONENOTE_TOKEN_PATH` (outside OneDrive, `chmod 600`), never printed/committed.
 - Revoke at account.microsoft.com or by deleting the app registration.
