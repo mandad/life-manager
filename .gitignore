@@ -4,8 +4,8 @@
 # This repo publishes ONLY code: the MCP servers (mcp-servers/), the automation
 # scripts (scripts/), and the ship-locator relay/pusher (ship-locator/).
 #
-# Strategy: ignore everything by default, re-include the three code directories,
-# then strip secrets, dependencies, and build artifacts back out even inside
+# Strategy: ignore everything by default, re-include the README + three code
+# directories, then strip secrets, dependencies, and build artifacts back out even inside
 # those directories. Personal data (the Obsidian vault, drafted docs, data
 # exports, screenshots) is never tracked.
 #
@@ -17,8 +17,9 @@
 # --- 1) Ignore every top-level entry by default ------------------------------
 /*
 
-# --- 2) Re-include this file and the code directories ------------------------
+# --- 2) Re-include this file, the top-level README, and the code directories -
 !/.gitignore
+!/README.md
 !/scripts/
 !/mcp-servers/
 !/ship-locator/
