@@ -1,0 +1,59 @@
+{
+  "mcpServers": {
+    "foursquare-checkins": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/foursquare-checkins/dist/index.js\""
+      ]
+    },
+    "nws-forecast": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/nws-forecast/dist/index.js\""
+      ]
+    },
+    "onenote": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/onenote/dist/index.js\""
+      ]
+    },
+    "rescuetime": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/rescuetime/dist/index.js\""
+      ]
+    },
+    "whoop": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/whoop/dist/index.js\""
+      ]
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "_comment": "Single source of truth for LLM-Land MCP servers (WSL-bridge mode). Edit here, then run from WSL:  python3 scripts/mcp-sync.py   --  serversRootWsl and winUser are auto-derived from the script's location when omitted; set them explicitly only to override. Secrets/env values live in secretsEnvPath (NOT here, NOT in git).",
+  "wslDistro": "Ubuntu",
+  "secretsEnvPath": "$HOME/.config/llm-land-mcp/secrets.env",
+  "desktopPackageFamily": "Claude_pzs8sxrjxfjjc",
+  "servers": {
+    "foursquare-checkins": {
+      "entry": "foursquare-checkins/dist/index.js",
+      "env": ["FOURSQUARE_OAUTH_TOKEN"]
+    },
+    "nws-forecast": {
+      "entry": "nws-forecast/dist/index.js",
+      "env": ["NWS_USER_AGENT"]
+    },
+    "onenote": {
+      "entry": "onenote/dist/index.js",
+      "env": ["ONENOTE_CLIENT_ID", "ONENOTE_TOKEN_PATH"]
+    },
+    "rescuetime": {
+      "entry": "rescuetime/dist/index.js",
+      "env": ["RESCUETIME_API_KEY"]
+    },
+    "whoop": {
+      "entry": "whoop/dist/index.js",
+      "env": ["WHOOP_CLIENT_ID", "WHOOP_CLIENT_SECRET", "WHOOP_REDIRECT_PORT", "WHOOP_REDIRECT_URI", "WHOOP_TOKENS_FILE"]
+    }
+  }
+}
