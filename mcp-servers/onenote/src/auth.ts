@@ -12,10 +12,36 @@
  * Token cache lives at ONENOTE_TOKEN_PATH (outside OneDrive), chmod 600, never printed.
  */
 
-import { promises as fs } from "node:fs";
+import { promises as fs, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import axios from "axios";
+
+// When launched by mcp-sync.py the inner command sources secrets.env, so the env is already set.
+// But `npm run auth` runs node directly and never sources it → ONENOTE_CLIENT_ID would be unset.
+// Self-load the shared secrets file as a fallback (already-set process.env always wins, so the
+// mcp-sync path is unaffected). Path overridable via LLM_LAND_SECRETS_ENV; default matches the
+// mcp-manifest. Values may reference $HOME/${VAR} (bash expands these when sourcing; we mirror it).
+function loadSecretsEnv(): void {
+  const file =
+    process.env.LLM_LAND_SECRETS_ENV ??
+    path.join(homedir(), ".config", "llm-land-mcp", "secrets.env");
+  if (!existsSync(file)) return;
+  for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const eq = line.indexOf("=");
+    const key = line.slice(0, eq).replace(/^export\s+/, "").trim();
+    if (!key || key in process.env) continue; // don't override env already provided
+    let val = line.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+      val = val.slice(1, -1);
+    val = val.replace(/\$\{?(\w+)\}?/g, (_, n) => (n === "HOME" ? homedir() : process.env[n] ?? ""));
+    process.env[key] = val;
+  }
+}
+
+loadSecretsEnv();
 
 const TENANT = "consumers"; // personal Microsoft accounts
 const AUTH_BASE = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0`;

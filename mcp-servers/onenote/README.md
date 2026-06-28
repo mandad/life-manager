@@ -13,25 +13,25 @@ Reads OneNote via Microsoft Graph for use in the LLM Land vault workflows (e.g. 
 See **[SETUP.md](SETUP.md)**. Short version:
 1. Register a personal-account app (Azure portal → App registrations), enable public-client flows, add delegated `Notes.Read` + `Notes.Create` + `offline_access`. Copy the **client ID**.
 2. `npm install && npm run build`
-3. `ONENOTE_CLIENT_ID=<your-id> npm run auth` → device-code login (one time).
-4. Wire into `.claude/settings.local.json` (see below); restart Claude Code.
+3. `npm run auth` → device-code login (one time). `ONENOTE_CLIENT_ID` / `ONENOTE_TOKEN_PATH` are read from `~/.config/llm-land-mcp/secrets.env` automatically (auth.ts loads it as a fallback when the vars aren't already in the env), so no inline prefix is needed. Override the file path with `LLM_LAND_SECRETS_ENV`, or just export the vars yourself.
+4. Register the server (managed centrally by `scripts/mcp-sync.py` → `~/.claude.json` + Claude Desktop); restart the client.
 
 ## Config (env)
+Provided via `~/.config/llm-land-mcp/secrets.env` (sourced by `mcp-sync.py` for the running server; auto-loaded by `auth.ts` for `npm run auth`):
 - `ONENOTE_CLIENT_ID` — app client ID (required)
-- `ONENOTE_TOKEN_PATH` — token cache path; default `~/.config/llm-land/onenote-tokens.json`. **Keep outside OneDrive.**
+- `ONENOTE_TOKEN_PATH` — token cache path (e.g. `$HOME/.config/llm-land-mcp/onenote-token.json`). **Keep outside OneDrive.**
 
-## Wiring (`.claude/settings.local.json`)
-```json
-"onenote": {
-  "type": "stdio",
-  "command": "node",
-  "args": ["/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/onenote/dist/index.js"],
-  "env": {
-    "ONENOTE_CLIENT_ID": "<your-client-id>",
-    "ONENOTE_TOKEN_PATH": "/home/damia/.config/llm-land/onenote-tokens.json"
-  }
-}
+## Wiring (managed by `mcp-sync.py`)
+MCP registration is generated, **not hand-edited**. `scripts/mcp-sync.py` reads `mcp-servers/mcp-manifest.json` and writes both Claude Code (`~/.claude.json`, user scope) and Claude Desktop (`claude_desktop_config.json`) in WSL-bridge mode — both clients run the same Linux build, each launched as:
+```bash
+bash -c 'set -a; [ -f "$HOME/.config/llm-land-mcp/secrets.env" ] && . "$HOME/.config/llm-land-mcp/secrets.env"; set +a; exec <wsl-node> .../onenote/dist/index.js'
 ```
+(Desktop wraps that in `wsl.exe -d <distro> -- …`.) The `set -a; . secrets.env` line is what feeds `ONENOTE_CLIENT_ID` / `ONENOTE_TOKEN_PATH` to the server. To (re)wire:
+```bash
+python3 scripts/mcp-sync.py --dry-run   # preview
+python3 scripts/mcp-sync.py             # apply, then restart the client(s)
+```
+Don't add this server with `claude mcp add` or in `.claude/settings.local.json` — `mcp-sync.py` prunes such duplicates to avoid conflicting-scope warnings. Runbook: `AI Scratchpad/Notes/MCP config sync.md`.
 
 ## Security
 - `Notes.Read` + `Notes.Create` — can read all notes and create new pages/sections, but **cannot modify or delete** existing notes (Notes.Create is create-only; we deliberately avoid `Notes.ReadWrite`). No client secret exists.
