@@ -39,8 +39,52 @@ ALWAYS_CURRENT = {
 }
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:#[^|\]]*)?(?:\|[^\]]*)?\]\]")
+# Markdown-style local links ([text](Some%20File.md) or .csv) — counted as
+# inbound for orphan detection (#22: path-qualified/markdown links previously
+# invisible, false-flagging linked docs as orphans).
+MDLINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s#][^)\s]*\.(?:md|csv))\)")
 TAG_RE = re.compile(r"(?<![\w/])#([A-Za-z][\w/-]*)")
 CHECKBOX_LINE_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(.+)$")
+
+# ---------- #22 broken-link false-positive filters (built 2026-07-06) ----------
+
+# Memory-slug wikilinks intentionally point outside the vault (auto-memory dir).
+MEMORY_DIR = Path.home() / ".claude" / "projects" / "-mnt-c-Users-damia-OneDrive-Documents-LLM-Land" / "memory"
+
+# Literal example tokens used in routine docs to *illustrate* wikilink syntax.
+EXAMPLE_TOKENS = {
+    "wikilinks", "wikilink", "wikilink]]s", "path", "memory-slug", "Foo",
+    "name", "their-name", "feedback_*",
+}
+
+# Frozen snapshot dirs — their links describe a past state; rot there is not
+# actionable and floods the report.
+SNAPSHOT_DIRS = ("_daily-data", "_weekly-data")
+
+
+def memory_slugs() -> set[str]:
+    """File stems of the auto-memory dir, hyphen-normalized (memory files use
+    underscore filenames but hyphenated `name:` slugs — match either form)."""
+    if not MEMORY_DIR.is_dir():
+        return set()
+    return {p.stem.replace("_", "-") for p in MEMORY_DIR.glob("*.md")}
+
+
+def is_false_positive(target: str, source_rel: Path, slugs: set[str]) -> bool:
+    """True when a broken-looking wikilink is a known non-actionable pattern."""
+    if any(part in SNAPSHOT_DIRS for part in source_rel.parts):
+        return True  # frozen snapshot source
+    t = target.strip()
+    if "..." in t or "*" in t:
+        return True  # elided/glob illustration
+    if "/home/" in t or t.startswith("~"):
+        return True  # external filesystem path
+    base = t.rsplit("/", 1)[-1]
+    if t in EXAMPLE_TOKENS or base in EXAMPLE_TOKENS:
+        return True  # doc example, not a real link
+    if base.replace("_", "-") in slugs:
+        return True  # auto-memory cross-reference (lives outside the vault)
+    return False
 
 MONTH_LOOKUP = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -136,6 +180,75 @@ def first_date(text: str, today: dt.date) -> dt.date | None:
     return max(candidates)
 
 
+# ---------- #24 vague-date detector (built 2026-07-07) ----------
+# Targets written month-only / season / fuzzy never parse on the deadline
+# radar (precedent: the MMC "2026-07" renewal milestone went unsurfaced for
+# two months). Detect them on open task lines + headings in Projects/*/Tasks.md
+# so the /weekly anchoring pass (routine Step 7) has a worklist.
+
+_MONTHS = (
+    r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+)
+
+VAGUE_DATE_RES = [
+    # ISO month-only: "2026-07" not followed by -DD
+    ("month-only ISO", re.compile(r"\b20\d{2}-(?:0[1-9]|1[0-2])\b(?!-\d)")),
+    # Month name + year with NO day number attached: "July 2026", "Feb 2027"
+    ("month + year, no day", re.compile(
+        rf"(?<!\d )\b(?:{_MONTHS})\.?\s+20\d{{2}}\b", re.IGNORECASE)),
+    # Season + year: "Fall 2026"
+    ("season", re.compile(r"\b(?:Spring|Summer|Fall|Autumn|Winter)\s+20\d{2}\b", re.IGNORECASE)),
+    # Fuzzy qualifiers: "~late July", "early Aug"
+    ("fuzzy (early/mid/late)", re.compile(
+        rf"\b(?:early|mid|late)[\s-]+(?:{_MONTHS})\b", re.IGNORECASE)),
+    # Month ranges: "Aug–Sep" / "Aug-Sep"
+    ("month range", re.compile(rf"\b(?:{_MONTHS})\s*[–—-]\s*(?:{_MONTHS})\b")),
+]
+
+# A day-anchored date on the same line means the radar already sees it.
+DAY_ANCHORED_RE = re.compile(
+    rf"\b\d{{4}}-\d{{2}}-\d{{2}}\b|(?<![\w/])\d{{1,2}}/\d{{1,2}}(?![/\d])|"
+    rf"\b(?:{_MONTHS})\s+\d{{1,2}}\b|\b\d{{1,2}}\s+(?:{_MONTHS})\b",
+    re.IGNORECASE,
+)
+
+STRUCK_RE = re.compile(r"~~.*~~")
+DONE_CHECKBOX_RE = re.compile(r"^\s*-\s*\[[xX]\]")
+HEADING_RE = re.compile(r"^#{1,6}\s")
+
+
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+
+def vague_dates_in(text: str, rel: str, today: dt.date) -> list[tuple[str, int, str, str]]:
+    """Flag open-task and heading lines carrying only vague date wording."""
+    found: list[tuple[str, int, str, str]] = []
+    for ln, line in enumerate(text.splitlines(), 1):
+        is_open_task = CHECKBOX_LINE_RE.match(line) is not None
+        is_heading = HEADING_RE.match(line) is not None
+        if not (is_open_task or is_heading):
+            continue
+        if DONE_CHECKBOX_RE.match(line) or STRUCK_RE.search(line):
+            continue
+        if DAY_ANCHORED_RE.search(line):
+            continue  # radar already parses this line
+        for kind, rx in VAGUE_DATE_RES:
+            m = rx.search(line)
+            if m:
+                # Past-year mention (e.g. "Nov 2021" course history) is a
+                # reference, not a target — skip.
+                ym = _YEAR_RE.search(m.group(0))
+                if ym and int(ym.group(1)) < today.year:
+                    continue
+                snippet = line.strip()
+                if len(snippet) > 120:
+                    snippet = snippet[:117] + "…"
+                found.append((rel, ln, kind, snippet))
+                break  # one flag per line
+    return found
+
+
 # ---------- vault scanning ----------
 
 def walk_md(root: Path):
@@ -157,27 +270,50 @@ def resolve_wikilink(target: str, source_path: Path, by_basename: dict[str, list
     target_clean = target.strip()
     if not target_clean:
         return None
+    # #22: extension-bearing targets (.csv etc.) resolve as-is, no .md appended.
+    suffixes = ["", ".md"] if "." not in target_clean.rsplit("/", 1)[-1] else [""]
     if "/" in target_clean:
-        rel = (source_path.parent / f"{target_clean}.md").resolve()
-        if rel.exists():
-            return rel
-        absp = (vault_root / f"{target_clean}.md").resolve()
-        if absp.exists():
-            return absp
+        for suffix in suffixes:
+            rel = (source_path.parent / f"{target_clean}{suffix}").resolve()
+            if rel.exists():
+                return rel
+            absp = (vault_root / f"{target_clean}{suffix}").resolve()
+            if absp.exists():
+                return absp
         return None
+    if "." in target_clean:  # bare filename with extension, e.g. [[file.csv]]
+        stem = target_clean.rsplit(".", 1)[0]
+        matches = by_basename.get(stem, [])
+        if matches:
+            return matches[0]
     matches = by_basename.get(target_clean, [])
     if matches:
         return matches[0]
     return None
 
 
+def _mdlink_inbound(text: str, path: Path, inbound: dict[Path, set[Path]]) -> None:
+    """#22: credit markdown-style local links ([x](Some%20File.md)) as inbound."""
+    from urllib.parse import unquote
+    for m in MDLINK_RE.finditer(text):
+        href = unquote(m.group(1))
+        if href.startswith(("http://", "https://")):
+            continue
+        resolved = (path.parent / href).resolve()
+        if resolved.exists():
+            inbound[resolved].add(path)
+
+
 def scan(root: Path, today: dt.date) -> dict:
     by_basename = file_basenames(root)
+    slugs = memory_slugs()
     broken: list[tuple[str, str]] = []
+    filtered_count = 0
     inbound: dict[Path, set[Path]] = defaultdict(set)
     tag_counts: Counter = Counter()
     folder_counts: Counter = Counter()
     open_dated: list[tuple[dt.date, int, str, int, str]] = []
+    vague_dates: list[tuple[str, int, str, str]] = []
 
     for path in walk_md(root):
         rel = path.relative_to(root)
@@ -190,6 +326,7 @@ def scan(root: Path, today: dt.date) -> dict:
                 resolved = resolve_wikilink(target, path, by_basename, root)
                 if resolved is not None:
                     inbound[resolved].add(path)
+            _mdlink_inbound(text, path, inbound)
             continue
 
         folder = str(rel.parent) if str(rel.parent) != "." else "(root)"
@@ -200,14 +337,19 @@ def scan(root: Path, today: dt.date) -> dict:
             target = m.group(1).strip()
             resolved = resolve_wikilink(target, path, by_basename, root)
             if resolved is None:
-                broken.append((str(rel), target))
+                if is_false_positive(target, rel, slugs):
+                    filtered_count += 1
+                else:
+                    broken.append((str(rel), target))
             else:
                 inbound[resolved].add(path)
+        _mdlink_inbound(text, path, inbound)
 
         for m in TAG_RE.finditer(text):
             tag_counts[m.group(1)] += 1
 
         if "Projects" in path.parts and path.name == "Tasks.md":
+            vague_dates.extend(vague_dates_in(text, str(rel), today))
             for ln, line in enumerate(text.splitlines(), 1):
                 m = CHECKBOX_LINE_RE.match(line)
                 if not m:
@@ -221,10 +363,12 @@ def scan(root: Path, today: dt.date) -> dict:
     return {
         "by_basename": by_basename,
         "broken": broken,
+        "filtered_count": filtered_count,
         "inbound": inbound,
         "tag_counts": tag_counts,
         "folder_counts": folder_counts,
         "open_dated": open_dated,
+        "vague_dates": vague_dates,
     }
 
 
@@ -239,7 +383,9 @@ def orphans(root: Path, inbound: dict[Path, set[Path]]) -> list[str]:
         # Skip _daily-data / _weekly-data captures — not meant to be linked.
         if any(p.startswith("_") for p in rel.parts):
             continue
-        if not inbound.get(path):
+        # #22: inbound keys mix resolved-absolute (path-qualified/mdlink) and
+        # walk-relative (basename) paths — check both forms.
+        if not inbound.get(path) and not inbound.get(path.resolve()):
             orphan_list.append(str(rel))
     return orphan_list
 
@@ -310,6 +456,11 @@ def render(today: dt.date, scan_result: dict) -> str:
             out.append(f"| `{src}` | `{tgt}` |")
     else:
         out.append("_None._")
+    if scan_result.get("filtered_count"):
+        out.append("")
+        out.append(f"_(#22 filter suppressed {scan_result['filtered_count']} known "
+                   "false positives: memory slugs, doc examples, snapshot-dir links, "
+                   "external paths.)_")
     out.append("")
 
     # Orphans
@@ -362,6 +513,18 @@ def render(today: dt.date, scan_result: dict) -> str:
             d = count - prev_count
             delta = f"{d:+d}" if d else "0"
         out.append(f"| `{folder}` | {count} | {delta} |")
+    out.append("")
+
+    # Vague dates needing anchors (#24)
+    out.append("## Vague dates needing anchors (radar-invisible — Step 7 anchoring pass)\n")
+    vd = scan_result.get("vague_dates", [])
+    if vd:
+        out.append("| Source | Kind | Line |")
+        out.append("|---|---|---|")
+        for rel, ln, kind, snippet in vd:
+            out.append(f"| `{rel}:{ln}` | {kind} | {snippet} |")
+    else:
+        out.append("_None — all dated targets are day-anchored._")
     out.append("")
 
     # Deadline radar

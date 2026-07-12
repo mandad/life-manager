@@ -338,6 +338,64 @@ server.tool(
 );
 
 server.tool(
+  "onenote_scan_sections",
+  "Batch scan: list new/changed pages across MANY sections in one call (server-side loop over onenote_list_pages, sharing the 429 backoff). Built for the /daily watermark scan — pass the cached section ids + the last_synced timestamp; returns only sections that have matching pages, or a one-line all-empty summary.",
+  {
+    sections: z
+      .array(
+        z.object({
+          id: z.string().describe("Section id"),
+          label: z.string().optional().describe("Display label (e.g. 'FA CO ▸ Personnel')"),
+        }),
+      )
+      .min(1)
+      .max(30)
+      .describe("Sections to scan, in order"),
+    since: z
+      .string()
+      .optional()
+      .describe("ISO 8601 date/time; only pages modified at or after this"),
+    top: z.number().int().min(1).max(100).default(20).describe("Max pages per section"),
+    response_format: fmt,
+  },
+  async ({ sections, since, top, response_format }) => {
+    const results: any[] = [];
+    const errors: any[] = [];
+    for (const s of sections) {
+      try {
+        let url = `/me/onenote/sections/${encodeURIComponent(s.id)}/pages?$select=id,title,createdDateTime,lastModifiedDateTime&$top=${top}&$orderby=lastModifiedDateTime desc`;
+        if (since) url += `&$filter=lastModifiedDateTime ge ${encodeURIComponent(since)}`;
+        const data = await graphGet(url);
+        const items = (data.value ?? []).map((p: any) => ({
+          id: p.id,
+          title: p.title,
+          created: p.createdDateTime,
+          modified: p.lastModifiedDateTime,
+        }));
+        if (items.length) results.push({ section: s.label ?? s.id, section_id: s.id, pages: items });
+      } catch (e) {
+        errors.push({ section: s.label ?? s.id, section_id: s.id, error: graphError(e) });
+      }
+    }
+    const scanned = sections.length;
+    const mdParts: string[] = [];
+    for (const r of results) {
+      mdParts.push(
+        `**${r.section}**\n` +
+          r.pages
+            .map((p: any) => `- **${p.title || "(untitled)"}** — ${p.modified}\n  \`${p.id}\``)
+            .join("\n"),
+      );
+    }
+    for (const err of errors) mdParts.push(`**${err.section}** — ⚠️ ${err.error}`);
+    const md = mdParts.length
+      ? `Scanned ${scanned} sections${since ? ` since ${since}` : ""} — ${results.length} with pages, ${errors.length} errors:\n\n${mdParts.join("\n\n")}`
+      : `Scanned ${scanned} sections${since ? ` since ${since}` : ""} — all empty, no new/changed pages.`;
+    return out(md, { scanned, since: since ?? null, results, errors }, response_format);
+  },
+);
+
+server.tool(
   "onenote_get_page",
   "Get a page's typed text (extracted from its HTML). Sets has_ink=true when the page also contains handwritten ink (use onenote_get_page_image to OCR it) and has_images=true when the page embeds raster images / screenshots whose text is NOT in the HTML (use onenote_get_page_screenshots to OCR those).",
   {
