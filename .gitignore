@@ -17,12 +17,15 @@
 # --- 1) Ignore every top-level entry by default ------------------------------
 /*
 
-# --- 2) Re-include this file, the top-level README, and the code directories -
+# --- 2) Re-include this file, the top-level README + LICENSE, the code
+#        directories, and the releasable starter template ---------------------
 !/.gitignore
 !/README.md
+!/LICENSE
 !/scripts/
 !/mcp-servers/
 !/ship-locator/
+!/template/
 
 # --- 3) Personal / local data — never track (belt-and-suspenders for §1) -----
 /AI Scratchpad/

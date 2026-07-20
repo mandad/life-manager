@@ -13,12 +13,23 @@ Invoked from /daily routine Step 8. Idempotent.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import sys
 from pathlib import Path
 
-MEMORY_DIR = Path.home() / ".claude/projects/-mnt-c-Users-damia-OneDrive-Documents-LLM-Land/memory"
-VAULT = Path("/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/AI Scratchpad")
+
+def _default_memory_dir() -> Path:
+    """Claude Code auto-memory dir for this project: cwd munged (non-alphanumeric -> '-')."""
+    key = re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd().resolve()))
+    return Path.home() / ".claude" / "projects" / key / "memory"
+
+
+# Run from the repo root. Override with LIFE_MEMORY_DIR / LIFE_VAULT_DIR env vars.
+MEMORY_DIR = (
+    Path(os.environ["LIFE_MEMORY_DIR"]) if os.environ.get("LIFE_MEMORY_DIR") else _default_memory_dir()
+)
+VAULT = Path(os.environ.get("LIFE_VAULT_DIR", "AI Scratchpad"))
 DIGEST_PATH = VAULT / "Notes/Memory digest.md"
 
 TYPE_ORDER = ["user", "feedback", "project", "reference"]
@@ -90,7 +101,7 @@ def write_digest(entries: list[dict], digest_path: Path) -> None:
         "",
         "# Memory digest",
         "",
-        "A scannable summary of what Claude has recorded in persistent auto-memory. The canonical files live at `~/.claude/projects/-mnt-c-Users-damia-OneDrive-Documents-LLM-Land/memory/`. This mirror is short blurbs only — refresh by the daily routine.",
+        "A scannable summary of what Claude has recorded in persistent auto-memory. The canonical files live in this project's Claude Code auto-memory directory (`~/.claude/projects/<project-key>/memory/`). This mirror is short blurbs only — refresh by the daily routine.",
         "",
         "**If anything below is wrong, outdated, or shouldn't be remembered, just say so** and Claude will update both this file and the source memory entry.",
         "",

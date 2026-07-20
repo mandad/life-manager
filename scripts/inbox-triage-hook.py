@@ -23,7 +23,7 @@ import re
 import sys
 from datetime import datetime
 
-INBOX_SUFFIX = "/AI Scratchpad/Inbox.md"
+INBOX_SUFFIX = "/" + os.environ.get("LIFE_VAULT_DIR", "AI Scratchpad") + "/Inbox.md"
 TIMESTAMP_RE = re.compile(
     r"^Last triaged:\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})", re.MULTILINE
 )

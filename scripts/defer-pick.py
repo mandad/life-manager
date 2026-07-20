@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import re
 import sys
 from pathlib import Path
 
-TASKS = Path("AI Scratchpad/My Day.md")
+TASKS = Path(os.environ.get("LIFE_VAULT_DIR", "AI Scratchpad")) / "My Day.md"
 
 # Effort token (case-insensitive) → minutes.
 EFFORT_MINUTES = {

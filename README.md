@@ -1,21 +1,39 @@
-# LLM Land
+# Life Manager
 
-The code half of a personal life-management system. The day-to-day surface is a private
-Obsidian vault driven by Claude Code; **this repository publishes only the code that supports
-it** — the MCP servers, the automation scripts, and the ship-position relay. The vault itself,
-drafted documents, data exports, and screenshots are personal and are never tracked (see
-[Publishing model](#publishing-model)).
+A personal life-management system run by [Claude Code](https://claude.com/claude-code) on top of
+a private Obsidian vault: a daily dashboard curated from per-project task lists, a quick-capture
+inbox, `/daily` and `/weekly` routines that sync tasks and pull personal data (health, computer
+time, location, weather, notes), an asynchronous question channel, an automation backlog Claude
+proposes into and builds from, and a work log that compiles straight into performance reporting.
+
+The vault itself is private and never tracked. **This repository publishes the code and the
+starter template** — enough for anyone to instantiate their own instance.
+
+## 🚀 Start your own
+
+```bash
+git clone https://github.com/mandad/life-manager
+cd life-manager
+claude   # then say: "set up my life manager"
+```
+
+Claude reads [`template/SETUP.md`](template/SETUP.md), interviews you (~10 minutes: your
+projects, which data sources you have, what optional modules you want), and instantiates a
+personalized vault + `CLAUDE.md` from [`template/vault/`](template/vault/). Your vault is
+git-ignored automatically — personal data never enters the repo. Data-source integrations are
+optional and pluggable; the routines run fine with none wired.
 
 ## What's here
 
 | Directory | What it is |
 |-----------|------------|
+| [`template/`](template/) | The releasable starter: vault skeleton, genericized daily/weekly routines, CLAUDE.md template, and the Claude-guided setup playbook. |
 | [`mcp-servers/`](mcp-servers/) | Local [Model Context Protocol](https://modelcontextprotocol.io) servers that expose personal data sources (health, location, weather, notes, computer usage) to Claude. |
-| [`scripts/`](scripts/) | Python automation supporting the daily/weekly routines — data pulls, renderers, vault maintenance, hooks. |
-| [`ship-locator/`](ship-locator/) | A user-space pusher + DreamHost relay that serves NOAA Ship *Fairweather*'s live position to the rest of the system. |
+| [`scripts/`](scripts/) | Python automation supporting the daily/weekly routines — data pulls, renderers, vault maintenance, hooks. Vault path configurable via `LIFE_VAULT_DIR` (default `AI Scratchpad`); memory paths auto-derive from the repo location. |
+| [`ship-locator/`](ship-locator/) | A user-space pusher + DreamHost relay serving a ship's live NMEA position — the author's mobile-location source, kept as a worked example of a custom data feed. |
 
-The Obsidian vault (`AI Scratchpad/`), `Documents/`, CSV/PNG exports, and local tool config
-live in the working tree but are deliberately git-ignored.
+The author's own Obsidian vault (`AI Scratchpad/`), drafted documents, CSV/PNG exports, and
+local tool config live in the working tree but are deliberately git-ignored.
 
 ## MCP servers
 
@@ -86,3 +104,7 @@ artifacts back out even inside those directories. Personal data is never tracked
 A `.gitignore` can't protect a secret hard-coded in source, so the code was audited (2026-06-18):
 the scripts and relay read tokens only from env vars / external config, never literals. Keep it
 that way — no `tokens.json`, `.env`, real `*.config.php`, or `.mcpb` bundles get committed.
+
+## License
+
+[MIT](LICENSE).

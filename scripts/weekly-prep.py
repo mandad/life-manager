@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-VAULT = Path("AI Scratchpad")
+VAULT = Path(os.environ.get("LIFE_VAULT_DIR", "AI Scratchpad"))
 WEEKLY_DATA_DIR = VAULT / "Notes" / "_weekly-data"
 
 ALWAYS_CURRENT = {
@@ -49,7 +50,16 @@ CHECKBOX_LINE_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(.+)$")
 # ---------- #22 broken-link false-positive filters (built 2026-07-06) ----------
 
 # Memory-slug wikilinks intentionally point outside the vault (auto-memory dir).
-MEMORY_DIR = Path.home() / ".claude" / "projects" / "-mnt-c-Users-damia-OneDrive-Documents-LLM-Land" / "memory"
+# Derived from cwd (Claude Code project-key munging); override with LIFE_MEMORY_DIR.
+MEMORY_DIR = (
+    Path(os.environ["LIFE_MEMORY_DIR"])
+    if os.environ.get("LIFE_MEMORY_DIR")
+    else Path.home()
+    / ".claude"
+    / "projects"
+    / re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd().resolve()))
+    / "memory"
+)
 
 # Literal example tokens used in routine docs to *illustrate* wikilink syntax.
 EXAMPLE_TOKENS = {
