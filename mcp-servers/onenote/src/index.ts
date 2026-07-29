@@ -14,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import axios, { AxiosError } from "axios";
+import { createHash } from "node:crypto";
 import { getAccessToken } from "./auth.js";
 import { extractInkml, parseTraces, renderStrokesToPng } from "./ink.js";
 import { extractImages, prepareImage } from "./images.js";
@@ -23,6 +24,7 @@ const CHARACTER_LIMIT = 25000;
 const TIMEOUT_MS = 30000;
 const INK_TIMEOUT_MS = 90000; // ink multipart can be multi-MB
 const SEARCH_CONCURRENCY = 6; // OneNote throttles hard; keep request fan-out modest
+const HASH_CONCURRENCY = 3; // hashing fans out one content GET per page — stay gentler than search
 
 // OneNote/Graph throttles aggressively (429), often WITHOUT a Retry-After header. Retry
 // retryable statuses honoring Retry-After when present, else exponential backoff + jitter.
@@ -176,6 +178,25 @@ function htmlToText(html: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** A page's raw content HTML — the single endpoint every text-reading tool uses. */
+async function fetchPageHtml(pageId: string): Promise<string> {
+  return (await graphGet(
+    `/me/onenote/pages/${encodeURIComponent(pageId)}/content?includeIDs=true`,
+    { raw: true },
+  )) as string;
+}
+
+/** A page's typed text — byte-identical to what onenote_get_page returns as `text`. */
+async function fetchPageText(pageId: string): Promise<string> {
+  return htmlToText(await fetchPageHtml(pageId));
+}
+
+/** Whitespace-normalized SHA256 of a page's typed text (stable across cosmetic re-flows). */
+function textHash(text: string): { hash: string; normalized: string } {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return { hash: createHash("sha256").update(normalized, "utf8").digest("hex"), normalized };
 }
 
 const fmt = z
@@ -395,6 +416,123 @@ server.tool(
   },
 );
 
+// Content fingerprinting for EDIT detection. On this consumer account
+// lastModifiedDateTime is never bumped when a page's content changes (modified == created on
+// every page checked, confirmed 2026-07-26), so the watermark scan (onenote_scan_sections) can
+// only ever see NEW pages. Hashing the typed text gives the caller something that does change.
+server.tool(
+  "onenote_hash_pages",
+  "Content-hash pages across MANY sections so the caller can DETECT EDITS to existing pages. Needed because on this (consumer) account OneNote's lastModifiedDateTime NEVER updates when a page is edited — it always equals createdDateTime — so a timestamp watermark scan (onenote_scan_sections) is structurally blind to edits and sees only new pages. Returns a SHA256 of each page's whitespace-normalized typed text; diff those against previously stored hashes — a changed hash means the page was edited. Note: hashes typed text only, so ink/image-only changes are invisible. Per-section errors are reported inline without failing the batch.",
+  {
+    sections: z
+      .array(
+        z.object({
+          id: z.string().describe("Section id"),
+          label: z.string().optional().describe("Display label (e.g. 'FA CO ▸ Personnel')"),
+        }),
+      )
+      .min(1)
+      .max(30)
+      .describe("Sections to hash, in order"),
+    created_since: z
+      .string()
+      .optional()
+      .describe(
+        "ISO 8601 date/time; keep only pages CREATED at or after this (filtered client-side). Bounds how many pages get fetched — one content GET per page, so keep the window tight to avoid 429s.",
+      ),
+    top: z.number().int().min(1).max(100).default(50).describe("Max pages to consider per section"),
+    response_format: fmt,
+  },
+  async ({ sections, created_since, top, response_format }) => {
+    const sinceMs = created_since ? Date.parse(created_since) : NaN;
+    const keep = (created: string | undefined): boolean => {
+      if (!created_since) return true;
+      if (!created) return false;
+      const t = Date.parse(created);
+      // Unparseable bound or timestamp → fall back to lexicographic ISO compare.
+      if (!Number.isFinite(sinceMs) || !Number.isFinite(t)) return created >= created_since;
+      return t >= sinceMs;
+    };
+
+    const results: any[] = [];
+    const errors: any[] = [];
+    let hashed = 0;
+    let pageErrors = 0;
+
+    for (const s of sections) {
+      try {
+        // Same listing endpoint as onenote_list_pages (newest first).
+        const url = `/me/onenote/sections/${encodeURIComponent(s.id)}/pages?$select=id,title,createdDateTime,lastModifiedDateTime&$top=${top}&$orderby=lastModifiedDateTime desc`;
+        const data = await graphGet(url);
+        const candidates = (data.value ?? [])
+          .map((p: any) => ({ id: p.id, title: p.title ?? "", created: p.createdDateTime }))
+          .filter((p: any) => keep(p.created));
+        if (!candidates.length) continue;
+
+        const pages = await mapPool(candidates, HASH_CONCURRENCY, async (p: any) => {
+          try {
+            const text = await fetchPageText(p.id);
+            const { hash, normalized } = textHash(text);
+            return {
+              id: p.id,
+              title: p.title,
+              created: p.created,
+              text_sha256: hash,
+              text_chars: normalized.length,
+            };
+          } catch (e) {
+            return {
+              id: p.id,
+              title: p.title,
+              created: p.created,
+              text_sha256: null,
+              text_chars: null,
+              error: graphError(e),
+            };
+          }
+        });
+        for (const p of pages) {
+          if (p.text_sha256) hashed++;
+          else pageErrors++;
+        }
+        results.push({ section: s.label ?? s.id, section_id: s.id, pages });
+      } catch (e) {
+        errors.push({ section: s.label ?? s.id, section_id: s.id, error: graphError(e) });
+      }
+    }
+
+    const scope = created_since ? ` created since ${created_since}` : "";
+    const mdParts: string[] = [];
+    for (const r of results) {
+      mdParts.push(
+        `**${r.section}**\n` +
+          r.pages
+            .map((p: any) =>
+              p.text_sha256
+                ? `- **${p.title || "(untitled)"}** — ${p.created} · ${p.text_chars} chars\n  \`${p.id}\`\n  \`${p.text_sha256}\``
+                : `- **${p.title || "(untitled)"}** — ${p.created} · ⚠️ ${p.error}\n  \`${p.id}\``,
+            )
+            .join("\n"),
+      );
+    }
+    for (const err of errors) mdParts.push(`**${err.section}** — ⚠️ ${err.error}`);
+    const header = `Hashed ${hashed} page(s)${scope} across ${sections.length} section(s) — ${results.length} with pages, ${errors.length} section error(s), ${pageErrors} page error(s).`;
+    const md = mdParts.length ? `${header}\n\n${mdParts.join("\n\n")}` : `${header} Nothing to hash.`;
+    return out(
+      md,
+      {
+        scanned_sections: sections.length,
+        created_since: created_since ?? null,
+        hashed,
+        page_errors: pageErrors,
+        results,
+        errors,
+      },
+      response_format,
+    );
+  },
+);
+
 server.tool(
   "onenote_get_page",
   "Get a page's typed text (extracted from its HTML). Sets has_ink=true when the page also contains handwritten ink (use onenote_get_page_image to OCR it) and has_images=true when the page embeds raster images / screenshots whose text is NOT in the HTML (use onenote_get_page_screenshots to OCR those).",
@@ -406,10 +544,7 @@ server.tool(
     try {
       // includeinkML=true returns multipart (HTML + InkML) when ink is present;
       // for phase 1 we read the HTML body and flag ink via a marker check.
-      const html = (await graphGet(
-        `/me/onenote/pages/${encodeURIComponent(page_id)}/content?includeIDs=true`,
-        { raw: true },
-      )) as string;
+      const html = await fetchPageHtml(page_id);
       const text = htmlToText(html);
       // OneNote injects data-render-* / ink fallback markers when strokes exist.
       const has_ink = /data-render-(original-src|src)|application\/inkml|<ink/i.test(html);
@@ -507,11 +642,7 @@ server.tool(
         const scored = await mapPool(scanList, SEARCH_CONCURRENCY, async (p) => {
           if (titleHit(p.title)) return { ...p, matched: "title" };
           try {
-            const html = (await graphGet(
-              `/me/onenote/pages/${encodeURIComponent(p.id)}/content?includeIDs=true`,
-              { raw: true },
-            )) as string;
-            const body = htmlToText(html).toLowerCase();
+            const body = (await fetchPageText(p.id)).toLowerCase();
             if (terms.every((w) => body.includes(w))) return { ...p, matched: "body" };
           } catch {
             /* skip unreadable page */
@@ -622,10 +753,7 @@ server.tool(
   },
   async ({ page_id, max_images, max_width }) => {
     try {
-      const html = (await graphGet(
-        `/me/onenote/pages/${encodeURIComponent(page_id)}/content?includeIDs=true`,
-        { raw: true },
-      )) as string;
+      const html = await fetchPageHtml(page_id);
       const images = extractImages(html);
       if (!images.length) {
         return {

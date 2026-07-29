@@ -71,6 +71,53 @@ EXAMPLE_TOKENS = {
 # actionable and floods the report.
 SNAPSHOT_DIRS = ("_daily-data", "_weekly-data")
 
+# ---------- #25 tag-census meta-doc filter (built 2026-07-26) ----------
+
+# Routine docs list tags as examples of drift to watch for; frozen snapshots
+# quote old tag tables; Automation backlog.md talks about tags. None of these
+# reflect live tag usage — counting them false-flags case-drift (e.g. #Cmd vs
+# #cmd) that only ever existed in prose, never in a live task file.
+
+
+def is_tag_census_meta_doc(rel: Path) -> bool:
+    """True when `rel` (vault-relative) should be excluded from the tag census."""
+    if any(part in SNAPSHOT_DIRS for part in rel.parts):
+        return True
+    if "routine" in rel.name.lower():
+        return True
+    if rel.name == "Automation backlog.md":
+        return True
+    return False
+
+
+# ---------- #29 deadline-radar resolved/struck suppression (built 2026-07-27) ----------
+
+# The past-due bucket kept re-listing "zombie" lines whose own text already says
+# they're resolved (struck-through tasks, NOT NEEDED / moot / handed-off notes),
+# burying the real past-due signal. Radar-only: the link/tag/orphan scans still
+# see these lines. Suppressed count is shown in the radar section (#22/#25 style).
+RADAR_RESOLVED_MARKERS = (
+    "not needed",
+    "no longer needed",
+    "moot",
+    "dropped",
+    "superseded",
+    "handed to",
+    "handed off",
+    "consolidated",
+    "track there",
+)
+RADAR_STRUCK_RE = re.compile(r"^\s*~~")
+
+
+def is_radar_resolved(body: str) -> bool:
+    """True when an open dated task line is resolved-in-text and should be
+    suppressed from the deadline radar."""
+    if RADAR_STRUCK_RE.match(body):
+        return True
+    lowered = body.lower()
+    return any(marker in lowered for marker in RADAR_RESOLVED_MARKERS)
+
 
 def memory_slugs() -> set[str]:
     """File stems of the auto-memory dir, hyphen-normalized (memory files use
@@ -321,8 +368,10 @@ def scan(root: Path, today: dt.date) -> dict:
     filtered_count = 0
     inbound: dict[Path, set[Path]] = defaultdict(set)
     tag_counts: Counter = Counter()
+    tag_census_skipped = 0
     folder_counts: Counter = Counter()
     open_dated: list[tuple[dt.date, int, str, int, str]] = []
+    radar_suppressed = 0
     vague_dates: list[tuple[str, int, str, str]] = []
 
     for path in walk_md(root):
@@ -355,8 +404,11 @@ def scan(root: Path, today: dt.date) -> dict:
                 inbound[resolved].add(path)
         _mdlink_inbound(text, path, inbound)
 
-        for m in TAG_RE.finditer(text):
-            tag_counts[m.group(1)] += 1
+        if is_tag_census_meta_doc(rel):
+            tag_census_skipped += 1
+        else:
+            for m in TAG_RE.finditer(text):
+                tag_counts[m.group(1)] += 1
 
         if "Projects" in path.parts and path.name == "Tasks.md":
             vague_dates.extend(vague_dates_in(text, str(rel), today))
@@ -367,6 +419,9 @@ def scan(root: Path, today: dt.date) -> dict:
                 body = m.group(1)
                 d = first_date(body, today)
                 if d is not None:
+                    if is_radar_resolved(body):
+                        radar_suppressed += 1
+                        continue
                     delta = (d - today).days
                     open_dated.append((d, delta, str(rel), ln, body.strip()))
 
@@ -376,8 +431,10 @@ def scan(root: Path, today: dt.date) -> dict:
         "filtered_count": filtered_count,
         "inbound": inbound,
         "tag_counts": tag_counts,
+        "tag_census_skipped": tag_census_skipped,
         "folder_counts": folder_counts,
         "open_dated": open_dated,
+        "radar_suppressed": radar_suppressed,
         "vague_dates": vague_dates,
     }
 
@@ -502,6 +559,9 @@ def render(today: dt.date, scan_result: dict) -> str:
             out.append(f"| `#{tag}` | {count} |")
     else:
         out.append("_No tags found._")
+    if scan_result.get("tag_census_skipped"):
+        out.append("")
+        out.append(f"_(tag census skipped {scan_result['tag_census_skipped']} meta-doc files)_")
     drift = tag_drift(scan_result["tag_counts"])
     if drift:
         out.append("")
@@ -540,6 +600,9 @@ def render(today: dt.date, scan_result: dict) -> str:
     # Deadline radar
     out.append("## Deadline radar — open dated tasks in Projects/*/Tasks.md\n")
     out.append("Buckets: past due → this week (0–7) → next 30 (8–30) → future (> 30).\n")
+    if scan_result.get("radar_suppressed"):
+        out.append(f"_(#29 filter suppressed {scan_result['radar_suppressed']} "
+                   "resolved/struck lines.)_\n")
     buckets: dict[str, list] = {"past": [], "week": [], "month": [], "future": []}
     for date, delta, path, ln, body in scan_result["open_dated"]:
         if delta < 0:
