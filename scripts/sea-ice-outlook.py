@@ -39,8 +39,9 @@ import subprocess
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 UA = "sea-ice-outlook/1.0 (NOAA Ship Fairweather /daily; accounts@dmanda.com)"
 API = "https://api.weather.gov"
@@ -59,6 +60,19 @@ FCST_RE = re.compile(r"^FORECAST FOR\s+(?:THE\s+)?(.+?)\s*\(", re.I)
 # "66 3'N 169 25'W", "66-03N 169-25W", "66 03 N 169 25 W"
 DMS_RE = re.compile(r"(\d{1,3})[\s\-]+(\d{1,2})\s*'?\s*([NS])[\s,]+(\d{1,3})[\s\-]+(\d{1,2})\s*'?\s*([EW])")
 DEC_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*([NS])[\s,]+(\d{1,3}(?:\.\d+)?)\s*([EW])")
+
+# validity-date parsing: explicit month-name map + regex, NOT strptime("%A %d %B %Y") --
+# %A/%B are locale-dependent and break if NWS ever drops the weekday. Live shape of the
+# 'valid' field from parse_product(): "Saturday 8 August 2026", "Wednesday 5 August 2026".
+MONTH_MAP = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+}
+VALID_DATE_RE = re.compile(
+    r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|"
+    r"November|December)\s+(\d{4})")
+WEEKDAY_RE = re.compile(r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*$")
+AK_TZ = ZoneInfo("America/Anchorage")
 
 
 def get(url, timeout=30, accept="application/geo+json"):
@@ -342,6 +356,42 @@ def iso_z(s):
         return None
 
 
+def parse_valid_end(raw):
+    """Parse the ASIP 'valid' field's END date -- e.g. "Wednesday 5 August 2026" or a
+    "... through Saturday 8 August 2026" range, where the LAST date in the string wins.
+    Explicit month-name map + regex (see VALID_DATE_RE), not strptime("%A %d %B %Y").
+    -> (end_date | None, multi_matched: bool, weekday_note: str | None)
+    weekday_note is a tripwire, not a gate: if the stated weekday disagrees with the
+    parsed date's actual weekday, the numeric date is still used but flagged."""
+    if not raw:
+        return None, False, None
+    matches = list(VALID_DATE_RE.finditer(raw))
+    if not matches:
+        return None, False, None
+    multi = len(matches) > 1
+    m = matches[-1]
+    d, mon, y = m.groups()
+    try:
+        end = date(int(y), MONTH_MAP[mon], int(d))
+    except (KeyError, ValueError):
+        return None, multi, None
+    weekday_note = None
+    wm = WEEKDAY_RE.search(raw[:m.start()])
+    if wm:
+        stated, actual = wm.group(1), end.strftime("%A")
+        if stated != actual:
+            weekday_note = (f"stated weekday \"{stated}\" does not match parsed date "
+                            f"{end.isoformat()}'s actual weekday ({actual}) -- possible misparse")
+    return end, multi, weekday_note
+
+
+def _parse_iso_date(s):
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--needed-through must be YYYY-MM-DD, got {s!r}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lat", type=float, help="latitude (default: live ship position)")
@@ -353,6 +403,10 @@ def main():
     ap.add_argument("--timeout", type=float, default=30, help="per-request timeout seconds (default 30)")
     ap.add_argument("--max-age-h", type=float, default=96,
                     help="flag the product stale beyond this many hours (default 96; ASIP issues ~2x/week)")
+    ap.add_argument("--needed-through", type=_parse_iso_date, default=None,
+                    help="YYYY-MM-DD: flag when the product's stated validity lapses before this "
+                         "Alaska-local date (America/Anchorage). No default -- only checked when "
+                         "explicitly passed, e.g. the next departure/commitment date.")
     ap.add_argument("--synopsis", action="store_true", help="also print the product SYNOPSIS paragraph")
     ap.add_argument("--no-zone-probe", action="store_true",
                     help="don't search offshore when the point itself is over land")
@@ -369,6 +423,7 @@ def main():
     lat, lon = args.lat, args.lon
     loc = f"{lat:.3f},{lon:.3f}" + (f" ({args.label})" if args.label else "")
     notes = []
+    needed_through = args.needed_through  # date | None -- no default, checked only if passed
 
     # --- source 1: the ASIP product (hard requirement; degrade gracefully) --------
     prod = None
@@ -378,12 +433,20 @@ def main():
         notes.append(f"ASIP Ice Forecast unavailable ({type(e).__name__}: {e})")
 
     if prod is None:
+        if needed_through:
+            notes.append(f"coverage through {needed_through.isoformat()} could not be assessed "
+                         f"— no product available this run")
         if args.json:
             print(json.dumps({"location": [lat, lon], "label": args.label,
-                              "available": False, "notes": notes}, indent=2))
+                              "available": False, "notes": notes,
+                              "needed_through": needed_through.isoformat() if needed_through else None,
+                              "valid_end": None, "valid_raw": None, "covers": None,
+                              "margin_days": None}, indent=2))
         else:
             print("### Sea ice (NWS Alaska Sea Ice Program)")
             print(f"- _no outlook this run — {notes[0]}_")
+            for n in notes[1:]:
+                print(f"- _note: {n}_")
         return
 
     parsed = parse_product(prod.get("productText", "") or "")
@@ -392,6 +455,51 @@ def main():
     stale = age_h is not None and age_h > args.max_age_h
     if stale:
         notes.append(f"product is {age_h:.0f}h old (>{args.max_age_h:.0f}h)")
+
+    # --- validity-coverage check: issuance age and decision-relevance are different
+    # questions. A product can sit under the staleness threshold and still have expired
+    # coverage for a date you actually care about. Dates compared in America/Anchorage
+    # (zoneinfo), not UTC -- validity covers *through end of* that Alaska local date.
+    valid_end, valid_multi, weekday_note = parse_valid_end(parsed["valid"])
+    if valid_multi:
+        notes.append("valid field had more than one date; used the last (end) date")
+    if weekday_note:
+        notes.append(weekday_note)
+
+    today_ak = datetime.now(AK_TZ).date()
+    covers = None          # True/False once compared against --needed-through, else None
+    margin_days = None
+    coverage_lines = []    # loud, standalone bullets -- printed apart from generic notes
+
+    if valid_end is None:
+        if needed_through:
+            raw_disp = parsed["valid"] or "<no 'valid' field found in product>"
+            coverage_lines.append(
+                f'- ⚠️ validity date unparsed ("{raw_disp}") — cannot check coverage through '
+                f'{needed_through.isoformat()}; age-based staleness check still active')
+    else:
+        # free companion check, unconditional -- no --needed-through required
+        if today_ak > valid_end:
+            coverage_lines.append(
+                f"- ⚠️ **VALIDITY LAPSED — product valid through {valid_end.isoformat()}; "
+                f"today is {today_ak.isoformat()} (Alaska time).** Reissue is overdue; "
+                f"re-pull or go direct to USNIC before relying on this again.")
+        if needed_through:
+            margin_days = (valid_end - needed_through).days
+            covers = margin_days >= 0
+            if covers:
+                margin_txt = ("covers with NO margin" if margin_days == 0
+                              else f"+{margin_days} day{'s' if margin_days != 1 else ''} margin")
+                coverage_lines.append(
+                    f"- validity covers {needed_through.isoformat()} "
+                    f"(ends {valid_end.isoformat()}, {margin_txt})")
+            else:
+                short = -margin_days
+                coverage_lines.append(
+                    f"- ⚠️ **VALIDITY GAP — product valid through {valid_end.isoformat()}; needed "
+                    f"through {needed_through.isoformat()} ({short} day{'s' if short != 1 else ''} "
+                    f"short).** The current answer expires before your commitment; re-pull or go "
+                    f"direct to USNIC before departure.")
 
     # --- source 2: marine zone containing the point (optional) -------------------
     zones, zone_note = locate_zones(lat, lon, min(args.timeout, 20), probe=not args.no_zone_probe,
@@ -452,6 +560,11 @@ def main():
             },
             "basin_forecast": fcst,
             "synopsis": parsed["synopsis"],
+            "needed_through": needed_through.isoformat() if needed_through else None,
+            "valid_end": valid_end.isoformat() if valid_end else None,
+            "valid_raw": parsed["valid"] or None,
+            "covers": covers,
+            "margin_days": margin_days,
             "notes": notes,
         }, indent=2))
         return
@@ -463,11 +576,16 @@ def main():
     if issued:
         meta.append("issued " + issued.strftime("%Y-%m-%d %H:%MZ") + (f" ⚠️ {age_h:.0f}h old" if stale else ""))
     if parsed["valid"]:
-        meta.append("valid " + parsed["valid"])
+        # raw + parsed together, always -- if the parse is ever wrong, the agent reading
+        # this output catches it (last line of defense; see parse_valid_end()).
+        meta.append("valid " + parsed["valid"] + (f" (→ {valid_end.isoformat()})" if valid_end else ""))
     if parsed["confidence"]:
         meta.append("confidence " + parsed["confidence"].rstrip("."))
     print(f"_{loc} · " + " · ".join(meta) + "_" if meta else f"_{loc}_")
     print()
+
+    for cl in coverage_lines:
+        print(cl)
 
     if entry:
         flag = "🧊 " if ice_covered else ""

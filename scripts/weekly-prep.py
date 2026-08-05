@@ -47,6 +47,55 @@ MDLINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s#][^)\s]*\.(?:md|csv))\)")
 TAG_RE = re.compile(r"(?<![\w/])#([A-Za-z][\w/-]*)")
 CHECKBOX_LINE_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(.+)$")
 
+# ---------- #33 tag-census span masking (built 2026-08-04) ----------
+
+# Broad wikilink-span matcher for masking purposes ONLY — deliberately not
+# WIKILINK_RE, which requires >=1 non-"#" char in the target ([^\]|#]+?) and
+# so never matches same-file heading anchors like [[#Tools / gear]]. That gap
+# is exactly why those anchors are invisible to the link scan yet visible to
+# the tag scan: [[#Tools / gear]] leaves a bare #Tools in the text for TAG_RE
+# to pick up. This regex matches any [[...]] span regardless of contents.
+WIKILINK_SPAN_RE = re.compile(r"\[\[[^\[\]]+\]\]")
+# Inline code spans — single line only, so an unmatched/stray backtick can't
+# swallow the rest of the file the way a multiline regex could.
+CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
+FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _mask_fenced_code(text: str) -> str:
+    """Blank the interior of fenced code blocks via a line-based fence
+    toggle, not a greedy re.DOTALL regex — a stray unclosed fence would
+    otherwise silently swallow the rest of the file."""
+    lines = text.split("\n")
+    in_fence = False
+    for i, line in enumerate(lines):
+        if FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            lines[i] = " "
+    return "\n".join(lines)
+
+
+def mask_census_spans(text: str) -> str:
+    """Build a census-only masked copy of `text` for the tag scan: blank
+    fenced code blocks, then wikilink spans, then inline code spans, so
+    #token-shaped text inside them isn't counted as a live tag (#33).
+
+    Spans are replaced with a single space, never "" — empty-string removal
+    can butt adjacent characters together and change what TAG_RE's
+    `(?<![\\w/])` lookbehind sees for a real tag right after a masked span
+    (e.g. `[[X]] #real-tag` must still count `#real-tag`).
+
+    Callers must NOT mask `text` itself — only this returned copy. The
+    wikilink/inbound-link scan runs on the original `text` and needs the
+    unmasked links intact.
+    """
+    masked = _mask_fenced_code(text)
+    masked = WIKILINK_SPAN_RE.sub(" ", masked)
+    masked = CODE_SPAN_RE.sub(" ", masked)
+    return masked
+
 # ---------- #22 broken-link false-positive filters (built 2026-07-06) ----------
 
 # Memory-slug wikilinks intentionally point outside the vault (auto-memory dir).
@@ -369,6 +418,7 @@ def scan(root: Path, today: dt.date) -> dict:
     inbound: dict[Path, set[Path]] = defaultdict(set)
     tag_counts: Counter = Counter()
     tag_census_skipped = 0
+    tag_census_suppressed = 0
     folder_counts: Counter = Counter()
     open_dated: list[tuple[dt.date, int, str, int, str]] = []
     radar_suppressed = 0
@@ -407,8 +457,15 @@ def scan(root: Path, today: dt.date) -> dict:
         if is_tag_census_meta_doc(rel):
             tag_census_skipped += 1
         else:
-            for m in TAG_RE.finditer(text):
+            # #33: census runs on a masked COPY (wikilink spans, inline code
+            # spans, fenced code blocks blanked) — `text` itself stays
+            # unmasked for the wikilink/inbound-link scan above.
+            census_text = mask_census_spans(text)
+            for m in TAG_RE.finditer(census_text):
                 tag_counts[m.group(1)] += 1
+            tag_census_suppressed += (
+                len(TAG_RE.findall(text)) - len(TAG_RE.findall(census_text))
+            )
 
         if "Projects" in path.parts and path.name == "Tasks.md":
             vague_dates.extend(vague_dates_in(text, str(rel), today))
@@ -432,6 +489,7 @@ def scan(root: Path, today: dt.date) -> dict:
         "inbound": inbound,
         "tag_counts": tag_counts,
         "tag_census_skipped": tag_census_skipped,
+        "tag_census_suppressed": tag_census_suppressed,
         "folder_counts": folder_counts,
         "open_dated": open_dated,
         "radar_suppressed": radar_suppressed,
@@ -562,6 +620,10 @@ def render(today: dt.date, scan_result: dict) -> str:
     if scan_result.get("tag_census_skipped"):
         out.append("")
         out.append(f"_(tag census skipped {scan_result['tag_census_skipped']} meta-doc files)_")
+    if scan_result.get("tag_census_suppressed"):
+        out.append("")
+        out.append(f"_(tag census: suppressed {scan_result['tag_census_suppressed']} "
+                   "tag-shaped tokens inside wikilinks/code spans)_")
     drift = tag_drift(scan_result["tag_counts"])
     if drift:
         out.append("")
