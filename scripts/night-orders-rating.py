@@ -69,12 +69,20 @@ REGISTRY = VAULT / "Notes/_daily-data/night-orders-facts.md"
 
 PREFIX = "NIGHT-ORDERS RATING"
 
-HEADER_DATE_RE = re.compile(r"^## Today\b.*?(\d{4}-\d{2}-\d{2})", re.MULTILINE)
+# The day heading has changed shape before ("## Today — Tue 2026-08-04 (...)" became
+# "## Tue 2026-08-04 · Day 71 — ..." on 2026-08-05), so match any level-2 heading that
+# carries an ISO date and take the first one.
+HEADER_DATE_RE = re.compile(r"^##\s+[^\n]*?(\d{4}-\d{2}-\d{2})", re.MULTILINE)
 
+# Anchor on the 🌙 emoji rather than an exact heading string, and end at the next
+# heading of ANY level. The heading has been both "### 🌙 Night Orders note" and
+# "# 🌙 Tonight — Night Orders note"; only the emoji has been stable.
 NIGHT_ORDERS_BLOCK_RE = re.compile(
-    r"^### 🌙 Night Orders note\n(.*?)(?=^### |\Z)", re.MULTILINE | re.DOTALL
+    r"^#{1,6}\s+🌙[^\n]*\n(.*?)(?=^#{1,6}\s|\Z)", re.MULTILINE | re.DOTALL
 )
-CHECKBOX_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s*(👍|👎)\s*(.*)$", re.MULTILINE)
+# Tolerate stray whitespace inside the brackets ("[x ]", "[ x]") — Obsidian's mobile
+# checkbox toggle and hand edits both produce it.
+CHECKBOX_RE = re.compile(r"-\s*\[\s*([ xX])\s*\]\s*(👍|👎)[ \t]*([^\n\-]*)")
 
 CANONICAL_LABEL = {"👍": "more like this", "👎": "less like this"}
 
