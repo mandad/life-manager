@@ -263,6 +263,26 @@ def _safe_iso(y: str, m: str, d: str) -> dt.date | None:
         return None
 
 
+HEADLINE_RE = re.compile(r"^\s*\*\*(.+?)\*\*")
+
+
+def deadline_scope(body: str) -> str:
+    """The part of a task line where a DEADLINE may legitimately live: the bolded headline.
+
+    Vault convention is `- [ ] **<task, with its deadline>** — <annotations, updates, Q-answer
+    history…>`, and those annotations are dense with dates that are NOT deadlines: capture
+    dates, "re-anchored 8/12", "Q47 answered 2026-08-08", prior targets. Scanning the whole
+    line made every one of them a candidate, so long-lived tasks drifted to whichever date
+    happened to match first — four MMC lines showed as PAST DUE on 2026-08-13 purely off
+    annotation stamps, none of which was a real deadline (found on the radar's second live
+    run; automation #40).
+
+    Returns the headline when one exists, else the whole body — so lines that don't follow
+    the convention keep the old behaviour rather than silently losing their date."""
+    m = HEADLINE_RE.match(body)
+    return m.group(1) if m else body
+
+
 def first_date(text: str, today: dt.date) -> dt.date | None:
     """Return the earliest plausible date found in `text`, or None.
 
@@ -474,7 +494,7 @@ def scan(root: Path, today: dt.date) -> dict:
                 if not m:
                     continue
                 body = m.group(1)
-                d = first_date(body, today)
+                d = first_date(deadline_scope(body), today)
                 if d is not None:
                     if is_radar_resolved(body):
                         radar_suppressed += 1
@@ -695,10 +715,50 @@ def render(today: dt.date, scan_result: dict) -> str:
     return "\n".join(out)
 
 
+def render_radar_only(today: dt.date, scan_result: dict, horizon: int) -> str:
+    """Just the dated-task radar out to `horizon` days, for the /daily Step-5 sweep.
+
+    Automation #40 (built 2026-08-12). The /daily radar was agent judgment over the project
+    files, and that missed a dated item for FOUR consecutive runs — the HOA-fee verification
+    due 8/10, captured into a NEWLY created project folder (Personal Admin, 8/04) that was
+    never in the agent's habitual sweep set. Discovery is mechanical and globs
+    `Projects/*/Tasks.md`, so a new project is covered the day it exists; only bucketing and
+    prioritisation need judgment, and those stay with the agent."""
+    rows = [r for r in scan_result["open_dated"] if r[1] <= horizon]
+    out = [f"# Deadline radar — next {horizon} days (as of {today.isoformat()})", ""]
+    if scan_result.get("radar_suppressed"):
+        out.append(f"_(#29 filter suppressed {scan_result['radar_suppressed']} "
+                   "resolved/struck lines.)_")
+        out.append("")
+    buckets: dict[str, list] = {"past": [], "today": [], "soon": []}
+    for row in rows:
+        delta = row[1]
+        buckets["past" if delta < 0 else "today" if delta == 0 else "soon"].append(row)
+    for key, label in [("past", "⚠️ PAST DUE"), ("today", "🔴 TODAY"),
+                       (" soon".strip(), f"Next {horizon} days")]:
+        items = sorted(buckets[key])
+        out.append(f"## {label} — {len(items)}")
+        if not items:
+            out.append("_None._")
+        else:
+            for date, delta, path, ln, body in items:
+                snippet = body if len(body) <= 160 else body[:157] + "…"
+                out.append(f"- `{date.isoformat()}` ({delta:+d}d) — `{path}:{ln}` — {snippet}")
+        out.append("")
+    out.append(f"_{len(rows)} dated task lines within the horizon. "
+               "Bucketing into Pinned / Surfacing / Defer is the agent's judgment call; "
+               "this list is discovery only._")
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Pre-compute mechanical inputs for /weekly.")
     ap.add_argument("--out", help="Write report to this path instead of stdout.")
     ap.add_argument("--today", help="Override today's date (YYYY-MM-DD).")
+    ap.add_argument("--radar-only", action="store_true",
+                    help="Print ONLY the dated-task deadline radar (for the /daily Step-5 sweep).")
+    ap.add_argument("--horizon", type=int, default=7,
+                    help="Days ahead to include with --radar-only (default 7).")
     args = ap.parse_args()
 
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
@@ -707,7 +767,8 @@ def main() -> None:
         sys.exit(1)
 
     result = scan(VAULT, today)
-    report = render(today, result)
+    report = (render_radar_only(today, result, args.horizon) if args.radar_only
+              else render(today, result))
 
     if args.out:
         out_path = Path(args.out)

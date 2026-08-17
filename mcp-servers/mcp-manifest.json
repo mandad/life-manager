@@ -8,6 +8,10 @@
       "entry": "foursquare-checkins/dist/index.js",
       "env": ["FOURSQUARE_OAUTH_TOKEN"]
     },
+    "google-tasks": {
+      "entry": "google-tasks/dist/index.js",
+      "env": ["GOOGLE_TASKS_CLIENT_ID", "GOOGLE_TASKS_CLIENT_SECRET", "GOOGLE_TASKS_TOKEN_PATH"]
+    },
     "nws-forecast": {
       "entry": "nws-forecast/dist/index.js",
       "env": ["NWS_USER_AGENT"]

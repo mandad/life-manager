@@ -170,25 +170,60 @@ def nice_period(name):
 
 
 # ------------------------------------------------------------ self-fetch
-def fetch_latest_cwf(location, timeout):
-    """Latest CWF product text for a NWS product-location code (e.g. ALU). ~15 lines by design
-    -- this is a test/fallback path, not the primary input (stdin from the nws-forecast MCP is)."""
+def _get_json(url, timeout):
     req = urllib.request.Request(
-        f"{API}/products/types/CWF/locations/{location}",
-        headers={"User-Agent": UA, "Accept": "application/ld+json"},
-    )
+        url, headers={"User-Agent": UA, "Accept": "application/ld+json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        lst = json.loads(r.read())
+        return json.loads(r.read())
+
+
+def _latest_product_text(ptype, location, timeout):
+    lst = _get_json(f"{API}/products/types/{ptype}/locations/{location}", timeout)
     graph = lst.get("@graph") or []
     if not graph:
-        raise RuntimeError(f"no CWF products listed for location {location}")
+        return ""
     graph.sort(key=lambda p: p.get("issuanceTime") or "", reverse=True)
-    req2 = urllib.request.Request(
-        graph[0]["@id"], headers={"User-Agent": UA, "Accept": "application/ld+json"}
-    )
-    with urllib.request.urlopen(req2, timeout=timeout) as r:
-        prod = json.loads(r.read())
-    return prod.get("productText", "") or ""
+    return _get_json(graph[0]["@id"], timeout).get("productText", "") or ""
+
+
+# Alaska marine text is keyed by AWIPS *location*, which is not the issuing office:
+# ALU/AER/AJK publish under their own codes, AFG's Arctic OFFSHORE zones (PKZ500/505/510)
+# live in OFF/AFG, and AFG's COASTAL zones (PKZ801-856) live in CWF under **WCZ** -- AFG
+# lists no CWF at all. The old default (`--location ALU`, CWF only) therefore returned
+# "zone not found in fetched ALU product" for every Arctic zone. Automation #37, 2026-08-12.
+AK_LOCATIONS = ["ALU", "WCZ", "AER", "AJK", "AFG"]
+
+
+def fetch_latest_cwf(location, timeout, zone=None):
+    """Latest marine text product containing `zone`. Fallback path only -- the primary input
+    is stdin from the nws-forecast MCP. Tries the requested location first, then the other
+    Alaska marine locations across both CWF and OFF, returning the first product that
+    actually contains the zone id. Raises only if nothing anywhere carries it."""
+    tried, last_text = [], ""
+    order = [location] + [loc for loc in AK_LOCATIONS if loc != location]
+    for loc in order:
+        for ptype in ("CWF", "OFF"):
+            key = f"{ptype}/{loc}"
+            if key in tried:
+                continue
+            tried.append(key)
+            try:
+                text = _latest_product_text(ptype, loc, timeout)
+            except Exception:
+                continue
+            if not text:
+                continue
+            last_text = last_text or text
+            if zone is None or zone.upper() in text.upper():
+                return text
+    if zone is not None:
+        raise RuntimeError(
+            f"zone {zone} not found in any of: {', '.join(tried)} "
+            f"(the 15-85 nm Arctic zones PKZ857/858/859 are in NO api.weather.gov product -- "
+            f"pipe the nws-forecast MCP output in on stdin instead)")
+    if last_text:
+        return last_text
+    raise RuntimeError(f"no marine products listed for location {location}")
 
 
 # ------------------------------------------------------------ output
@@ -246,7 +281,7 @@ def main():
     # --- gather input text ------------------------------------------------
     if args.zone:
         try:
-            text = fetch_latest_cwf(args.location, args.timeout)
+            text = fetch_latest_cwf(args.location, args.timeout, zone=args.zone)
         except Exception as e:
             emit([], 0, note=f"self-fetch failed for --zone {args.zone} ({type(e).__name__}: {e})")
             return

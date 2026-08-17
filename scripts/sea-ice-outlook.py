@@ -199,6 +199,33 @@ def paragraphs(text):
     return out
 
 
+STATUS_SENT_RE = re.compile(
+    r"[^.]*\b(?:ice[- ]free|ice free|ice covered|open water|no ice|first[- ]year ice|"
+    r"marginal ice|pack ice)\b[^.]*\.", re.I)
+
+
+def distill_status(raw):
+    """Reduce a zone group's collected text to an actual STATUS sentence.
+
+    Bug #38(2): the Beaufort and Bering sections put a short standalone sentence after the
+    zone-id list ("Ice free."), but the CHUKCHI section puts the multi-hundred-character
+    ice-edge VERTEX paragraph there instead, and the real status is only its closing
+    sentence ("The ice edge is open water."). The old code echoed the whole vertex blob as
+    the zone's status, which is what the /daily block quoted. Rule: if the collected text is
+    short, it IS the status; otherwise pull the last sentence that actually names an ice
+    condition, and fall back to a truncation only if nothing matches."""
+    raw = " ".join(raw.split())
+    if not raw:
+        return raw
+    if len(raw) <= STATUS_MAX_CHARS:
+        return raw
+    hits = STATUS_SENT_RE.findall(raw) or [m.group(0) for m in STATUS_SENT_RE.finditer(raw)]
+    if hits:
+        # last match wins: the vertex paragraph closes with the operative sentence
+        return " ".join(hits[-1].split()).strip()
+    return raw[:STATUS_MAX_CHARS].rstrip() + "…"
+
+
 def parse_product(text):
     """-> {'zones': {id: [{...}, ...]}, 'basin_forecasts': {BASIN: para}, 'edges': [...],
            'valid': str, 'confidence': str, 'synopsis': str}
@@ -214,7 +241,7 @@ def parse_product(text):
 
     def flush():
         if pending and status_buf:
-            st = " ".join(status_buf).strip()
+            st = distill_status(" ".join(status_buf).strip())
             for zid in pending:
                 zones.setdefault(zid, []).append(
                     {"id": zid, "name": pending_names.get(zid, ""), "basin": basin, "status": st})
@@ -252,11 +279,24 @@ def parse_product(text):
     paras = paragraphs(text)
     basin_forecasts, edges = {}, []
     valid = confidence = synopsis = ""
-    for p in paras:
+    for idx, p in enumerate(paras):
         fm = FCST_RE.match(p)
         if fm:
             key = fm.group(1).strip().upper()
-            basin_forecasts[key] = p
+            # Bug #38(1): the product often breaks a forecast into TWO paragraphs — the
+            # heading plus "Forecast confidence is high.", then a blank line, then the real
+            # body. Capturing only the matched paragraph returned the confidence sentence and
+            # dropped the forecast entirely (the 8/8-8/10 Chukchi runs). Absorb following
+            # paragraphs until the next structural marker. Sections whose forecast genuinely
+            # has no body (Bering, this issuance) absorb nothing and are unchanged.
+            body = [p]
+            for q in paras[idx + 1:]:
+                if (FCST_RE.match(q) or SECTION_RE.match(q) or ZONE_RE.match(q)
+                        or q.upper().startswith(("SYNOPSIS", "ANALYSIS CONFIDENCE",
+                                                 "FORECAST VALID", "&&"))):
+                    break
+                body.append(q)
+            basin_forecasts[key] = " ".join(body).strip()
             continue
         if p.upper().startswith("FORECAST VALID"):
             valid = p[len("FORECAST VALID"):].strip(" .:")

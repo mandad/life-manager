@@ -160,6 +160,18 @@ class NwsApiError extends Error {
   }
 }
 
+/** Plain-text/HTML GET against an absolute URL, outside the api.weather.gov base client.
+ *  Used only by the marine-forecast shmrn.php fallback (automation #37, 2026-08-12) for the
+ *  Arctic 15-85 nm zones, which exist in no api.weather.gov text product. */
+async function fetchText(url: string, timeoutMs = 15000): Promise<string> {
+  const response = await axios.get<string>(url, {
+    timeout: timeoutMs,
+    responseType: "text",
+    headers: { "User-Agent": USER_AGENT, Accept: "text/html,text/plain" },
+  });
+  return typeof response.data === "string" ? response.data : String(response.data);
+}
+
 async function nwsRequest<T>(path: string, accept?: string): Promise<T> {
   try {
     const response = await httpClient.get<T>(
@@ -712,18 +724,37 @@ Notes:
         expires: f.properties.expires,
       }));
 
-      // Marine text product code varies by office: ALU/AJK issue CWF (Coastal Waters
-      // Forecast); AFG issues OFF (Offshore) for the Arctic zones. Try in order; first
-      // product whose text contains the zone's block wins.
+      // Marine text products are keyed by AWIPS *location*, which is NOT always the issuing
+      // office. ALU/AJK issue CWF under their own code and AFG issues OFF for the Arctic
+      // offshore zones — but AFG's COASTAL zones (PKZ80x/85x) are published under location
+      // **WCZ** ("CWFWCZ", Northwest Alaska Coastal Waters), and AFG itself lists NO CWF
+      // products at all. An office-only lookup therefore returned null text for every
+      // nearshore Arctic zone, which cost five consecutive /daily runs a manual hand-pull
+      // (automation #37; PKZ857 on 8/07 and 8/10, PKZ854 on 8/11, PKZ805 on 8/12).
+      // Fix: try the office first, then a known set of sibling locations, then — for
+      // non-Alaska zones — a bounded sweep of the product type's own location list.
+      const AK_MARINE_LOCATIONS = ["WCZ", "ALU", "AER", "AJK", "AFG"];
+      const GENERIC_SWEEP_CAP = 8;
+
       let forecastText: string | null = null;
       let issued = "";
       let productType = "";
-      if (office) {
+      let productLocation = "";
+      const tried = new Set<string>();
+
+      const tryLocation = async (loc: string): Promise<boolean> => {
+        if (!loc || tried.has(loc)) return false;
+        tried.add(loc);
         for (const ptype of ["CWF", "OFF"]) {
-          const list = await nwsRequest<ProductsListResponse>(
-            `/products/types/${ptype}/locations/${office}`,
-            "application/ld+json",
-          );
+          let list: ProductsListResponse;
+          try {
+            list = await nwsRequest<ProductsListResponse>(
+              `/products/types/${ptype}/locations/${loc}`,
+              "application/ld+json",
+            );
+          } catch {
+            continue; // a location that issues no product of this type 404s — not an error
+          }
           const latest = list["@graph"]?.[0];
           if (!latest) continue;
           const prod = await nwsRequest<ProductResponse>(
@@ -735,14 +766,85 @@ Notes:
             forecastText = seg;
             issued = prod.issuanceTime ?? latest.issuanceTime ?? "";
             productType = ptype;
-            break;
+            productLocation = loc;
+            return true;
           }
+        }
+        return false;
+      };
+
+      let found = await tryLocation(office);
+      if (!found && zone.id.startsWith("PK")) {
+        for (const loc of AK_MARINE_LOCATIONS) {
+          if (await tryLocation(loc)) { found = true; break; }
+        }
+      }
+      if (!found) {
+        // Last resort, bounded: ask each product type which locations it publishes under and
+        // sweep the ones not already tried. Capped so a miss can never turn into 40+ fetches.
+        for (const ptype of ["CWF", "OFF"]) {
+          if (found) break;
+          let locs: Record<string, string | null> = {};
+          try {
+            const resp = await nwsRequest<{ locations?: Record<string, string | null> }>(
+              `/products/types/${ptype}/locations`,
+              "application/ld+json",
+            );
+            locs = resp.locations ?? {};
+          } catch {
+            continue;
+          }
+          let swept = 0;
+          for (const loc of Object.keys(locs)) {
+            if (tried.has(loc)) continue;
+            if (swept >= GENERIC_SWEEP_CAP) break;
+            swept += 1;
+            if (await tryLocation(loc)) { found = true; break; }
+          }
+        }
+      }
+
+      if (!found) {
+        // Tier 3 — the zone exists but is in NO api.weather.gov text product. Verified
+        // 2026-08-12: CWFWCZ carries PKZ801-856 and OFF/AFG carries only PKZ500/505/510, so
+        // the 15-85 nm Arctic band (PKZ857/858/859) is published ONLY on the public
+        // marine-forecast page. Scrape it — it is the same NWS text, just the other outlet.
+        try {
+          const html = await fetchText(
+            `https://forecast.weather.gov/shmrn.php?mz=${zone.id}`,
+          );
+          const plain = html
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&");
+          // the block runs from the zone's UGC header line to the product terminator
+          const start = plain.search(new RegExp(`${zone.id}-\\d{6}-`));
+          if (start >= 0) {
+            const rest = plain.slice(start);
+            const end = rest.indexOf("$$");
+            const block = (end > 0 ? rest.slice(0, end) : rest)
+              .split("\n")
+              .map((l: string) => l.replace(/\s+/g, " ").trim())
+              .filter(Boolean)
+              .join("\n")
+              .trim();
+            if (block) {
+              forecastText = block;
+              productType = "SHMRN";
+              productLocation = "forecast.weather.gov";
+              found = true;
+            }
+          }
+        } catch {
+          // leave forecastText null; the message below reports what was searched
         }
       }
 
       const output = {
         zone: { id: zone.id, name: zone.name, office },
         product_type: productType,
+        product_location: productLocation,
         issued,
         forecast_text: forecastText,
         alerts,
@@ -752,7 +854,7 @@ Notes:
       if (params.response_format === ResponseFormat.MARKDOWN) {
         const lines: string[] = [
           `# Marine forecast — ${zone.name} (${zone.id})`,
-          `Office: ${office || "?"}${productType ? ` · ${productType}` : ""} · Issued: ${issued || "?"}`,
+          `Office: ${office || "?"}${productType ? ` · ${productType}${productLocation && productLocation !== office ? `${productLocation}` : ""}` : ""} · Issued: ${issued || "?"}`,
         ];
         if (!alerts.length) {
           lines.push(`Marine alerts: none active`);
@@ -765,7 +867,7 @@ Notes:
         lines.push("");
         lines.push(
           forecastText ??
-            `(no zone text block found in ${office}'s CWF/OFF products — this nearshore zone may not carry a text forecast; for an inport use the land grid via nws_get_forecast)`,
+            `(no zone text block found — searched CWF/OFF products at ${[...tried].join(", ") || "no locations"}; this zone may genuinely carry no text segment. For an inport use the land grid via nws_get_forecast.)`,
         );
         text = lines.join("\n");
       } else {

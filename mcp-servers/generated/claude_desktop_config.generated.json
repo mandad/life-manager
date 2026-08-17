@@ -11,6 +11,17 @@
         "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/foursquare-checkins/dist/index.js\""
       ]
     },
+    "google-tasks": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "--",
+        "bash",
+        "-c",
+        "set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec \"/usr/bin/node\" \"/mnt/c/Users/damia/OneDrive/Documents/LLM_Land/mcp-servers/google-tasks/dist/index.js\""
+      ]
+    },
     "nws-forecast": {
       "command": "wsl.exe",
       "args": [
