@@ -27,6 +27,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from _secrets import load_secrets  # automation #42: secrets.env is the single store
+
 REALTIME = "https://api.tomorrow.io/v4/weather/realtime"
 FORECAST = "https://api.tomorrow.io/v4/weather/forecast"
 
@@ -45,14 +47,17 @@ KM_TO_NM = 0.539957
 def resolve_key(arg_key):
     if arg_key:
         return arg_key
+    load_secrets()          # fills from secrets.env; anything already exported wins
     env = os.environ.get("TOMORROW_API_KEY")
     if env:
         return env
     f = Path(__file__).resolve().parent / ".tomorrow_token"
     if f.exists():
         return f.read_text().strip()
-    sys.exit("No tomorrow.io key — pass --key, set $TOMORROW_API_KEY (in ~/.bashrc; run via `bash -ic`), "
-             "or write scripts/.tomorrow_token. Get a free key at https://app.tomorrow.io/development/keys")
+    sys.exit("No tomorrow.io key — pass --key, or set TOMORROW_API_KEY in "
+             "~/.config/llm-land-mcp/secrets.env (see mcp-servers/secrets.env.example). "
+             "Legacy fallback: scripts/.tomorrow_token. "
+             "Free key at https://app.tomorrow.io/development/keys")
 
 
 def ship_latlon():

@@ -30,6 +30,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from _secrets import load_secrets  # automation #42: secrets.env is the single store
+
 API = "https://api.synopticdata.com/v2/stations/latest"
 MARINE_NETWORKS = "96,286,179,332"  # MARITIME(buoys/CMAN), NDBC, AJKNDBC, Marine Exchange AK
 
@@ -53,14 +55,17 @@ VAR_LABELS = [
 def resolve_token(arg_token):
     if arg_token:
         return arg_token
+    load_secrets()          # fills from secrets.env; anything already exported wins
     env = os.environ.get("SYNOPTIC_TOKEN")
     if env:
         return env
     f = Path(__file__).resolve().parent / ".synoptic_token"
     if f.exists():
         return f.read_text().strip()
-    sys.exit("No token — pass --token, set $SYNOPTIC_TOKEN (in ~/.bashrc; run via `bash -ic`), "
-             "or write scripts/.synoptic_token")
+    sys.exit("No token — pass --token, or set SYNOPTIC_TOKEN in "
+             "~/.config/llm-land-mcp/secrets.env (see mcp-servers/secrets.env.example). "
+             "Legacy fallbacks still honoured: $SYNOPTIC_TOKEN in the environment, "
+             "or scripts/.synoptic_token.")
 
 
 def fetch(params):
