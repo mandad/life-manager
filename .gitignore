@@ -45,6 +45,9 @@
 !**/.env.sample
 !**/.env.example
 **/secrets.*
+# ...but the TEMPLATE must ship: setup docs (README, google-tasks/SETUP.md) tell you to copy
+# it, and it holds only empty keys. Mirrors the .env.sample/.env.example exception above.
+!**/secrets.env.example
 **/credentials*.json
 **/*.pem
 **/*.key
