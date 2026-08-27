@@ -67,6 +67,7 @@ interface TokenCache {
   expires_at: number; // epoch ms
   scope?: string;
   account_hint?: string;
+  authorized_at?: number; // epoch ms of the last interactive `npm run auth` (refresh-token issuance)
 }
 
 async function readCache(): Promise<TokenCache | null> {
@@ -122,6 +123,7 @@ export async function getAccessToken(): Promise<string> {
     expires_at: Date.now() + (data.expires_in ?? 3600) * 1000,
     scope: data.scope ?? cache.scope,
     account_hint: cache.account_hint,
+    authorized_at: cache.authorized_at, // preserve across silent refreshes
   };
   await writeCache(updated);
   return updated.access_token;
@@ -220,15 +222,64 @@ async function interactiveLogin(): Promise<void> {
     refresh_token: data.refresh_token,
     expires_at: Date.now() + (data.expires_in ?? 3600) * 1000,
     scope: data.scope,
+    authorized_at: Date.now(),
   });
   console.error(`\n✅ Token cached at ${tokenPath()} (chmod 600). Granted scope: ${data.scope}`);
   console.error("Restart Claude Code to pick the server up.\n");
 }
 
+// ------------------------------------------------------------------ auth-health probe (#50)
+/**
+ * `--check` auth-health probe (automation #50). Reads the token cache, does ONE live
+ * tasklists.list call (the only reliable test of the refresh token), and reports
+ * OK / EXPIRES-SOON / DEAD with an exit code so /daily can warn BEFORE the token silently
+ * dies mid-week. The OAuth app is stuck in "Testing" publishing status (personal Cloud
+ * project), so refresh tokens expire ~7 days after each interactive auth; when `authorized_at`
+ * is present we also warn as that approaches.
+ *   exit 0 = OK · exit 1 = OK but expiring soon (re-auth advised) · exit 2 = DEAD (re-auth now)
+ */
+const REAUTH = "cd mcp-servers/google-tasks && npm run auth";
+export async function checkAuth(): Promise<number> {
+  const cache = await readCache();
+  if (!cache?.refresh_token) {
+    console.log(`DEAD: no Google Tasks token cache at ${tokenPath()}. Re-auth: ${REAUTH}`);
+    return 2;
+  }
+  let soon = "";
+  if (typeof cache.authorized_at === "number") {
+    const days = (Date.now() - cache.authorized_at) / 86_400_000;
+    if (days >= 6)
+      soon = ` (authorized ${days.toFixed(1)}d ago — Testing-mode tokens expire ~7d; re-auth soon: ${REAUTH})`;
+  }
+  try {
+    const token = await getAccessToken();
+    await axios.get("https://tasks.googleapis.com/tasks/v1/users/@me/lists", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { maxResults: 1 },
+      timeout: 20_000,
+    });
+  } catch (e) {
+    const msg = axios.isAxiosError(e)
+      ? `${e.response?.status ?? ""} ${JSON.stringify(e.response?.data ?? e.message)}`.trim()
+      : String(e);
+    console.log(`DEAD: Google Tasks token rejected (${msg}). Re-auth: ${REAUTH}`);
+    return 2;
+  }
+  if (soon) {
+    console.log(`EXPIRES-SOON: token still works${soon}`);
+    return 1;
+  }
+  console.log("OK: Google Tasks token valid.");
+  return 0;
+}
+
 const isMain =
   process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
-  interactiveLogin().catch((e) => {
+  const run = process.argv.includes("--check")
+    ? checkAuth().then((code) => process.exit(code))
+    : interactiveLogin();
+  run.catch((e) => {
     console.error("\n❌ " + (e instanceof Error ? e.message : String(e)));
     process.exit(1);
   });

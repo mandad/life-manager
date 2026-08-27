@@ -11,7 +11,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "auth": "tsx src/auth-cli.ts",
+    "auth": "bash -c 'set -a; [ -f \"$HOME/.config/llm-land-mcp/secrets.env\" ] && . \"$HOME/.config/llm-land-mcp/secrets.env\"; set +a; exec ./node_modules/.bin/tsx src/auth-cli.ts'",
     "clean": "rimraf dist"
   },
   "engines": {

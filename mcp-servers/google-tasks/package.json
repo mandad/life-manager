@@ -12,7 +12,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "clean": "rimraf dist",
-    "auth": "node dist/auth.js"
+    "auth": "node dist/auth.js",
+    "check": "node dist/auth.js --check"
   },
   "engines": { "node": ">=18" },
   "dependencies": {
