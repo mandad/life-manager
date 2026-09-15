@@ -44,7 +44,10 @@ INPUT
 -----
 Primary path: pipe zone-forecast text on stdin -- either a bare zone segment (starting
 "PKZ767-...") or a full multi-zone Coastal Waters Forecast (CWF) product. Zones are split on
-"^PKZ\\d{3}-" and each is labeled separately in the output.
+"^PKZ\\d{3}-" and each is labeled separately in the output. Periods are recognized in EITHER the
+raw product's ".TODAY..." dot-marker form OR the nws-forecast MCP's cleaned form, which strips
+those dots and leaves bare labels (TODAY, TONIGHT, SAT NIGHT, SATURDAY NIGHT, ...) leading a line
+or leading the forecast text directly -- whichever form is present; see extract_periods().
 
 Secondary path: --zone PKZ767 self-fetches the latest CWF from the NWS products API
 (/products/types/CWF/locations/<--location, default ALU -- PKZ767 lives in the ALU product>) and
@@ -79,6 +82,26 @@ API = "https://api.weather.gov"
 ZONE_HEADER_RE = re.compile(r"^(PKZ\d{3})-", re.M)
 ZONE_NAME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 ,.'&/()+-]*?)-\s*$")
 PERIOD_RE = re.compile(r"^\.([A-Z][A-Z0-9 ,+/-]*?)\.\.\.", re.M)
+
+# Fallback period splitter for the nws-forecast MCP's cleaned `forecast_text`, which strips the
+# raw CWF product's ".PERIOD..." dot-markers entirely (bare "TODAY", "TONIGHT", "SAT NIGHT", ...
+# left as plain words, either alone on a line or immediately leading the forecast text on the
+# same line). Only used when PERIOD_RE finds zero raw markers -- see extract_periods() -- so the
+# raw dot-marker path (and its behavior) is completely unchanged. Longest-first so e.g.
+# "SATURDAY NIGHT" / "SAT NIGHT" win over the bare "SATURDAY" / "SAT" they contain; \b after each
+# label (rather than relying on ordering alone) stops "SAT" from matching inside "SATURDAY".
+_DAY_ABBR = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+_DAY_FULL = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+_DAY_NAMES = _DAY_FULL + _DAY_ABBR
+_STRIPPED_LABELS = sorted(
+    ["REST OF TODAY", "REST OF TONIGHT", "THIS AFTERNOON", "THIS EVENING", "OVERNIGHT",
+     "TONIGHT", "TODAY"]
+    + _DAY_NAMES + [f"{d} NIGHT" for d in _DAY_NAMES],
+    key=len, reverse=True,
+)
+STRIPPED_PERIOD_RE = re.compile(
+    r"^(" + "|".join(_STRIPPED_LABELS) + r")\b[ \t]*\n?", re.M | re.I)
+
 GUST_RE = re.compile(r"gusts?\s+(?:up\s+to|to|as\s+high\s+as|near)\s+\d+\s*kt", re.I)
 WIND_KT_RE = re.compile(r"(\d+)\s*kt", re.I)
 DIR_RE = re.compile(
@@ -117,13 +140,29 @@ def split_zones(text):
 
 def extract_periods(zone_text):
     """-> list of (raw_period_name, body_text). Skips SYNOPSIS blocks (narrative, not a
-    discrete wind/seas period) so they don't inflate the unparsed count."""
+    discrete wind/seas period) so they don't inflate the unparsed count.
+
+    Tries the raw CWF ".PERIOD..." dot-marker form first; if the text carries none at all,
+    falls back to STRIPPED_PERIOD_RE for the nws-forecast MCP's cleaned text, which strips
+    those dot-markers and leaves bare period labels (TODAY, TONIGHT, SAT NIGHT, ...). The
+    fallback only engages when zero raw markers are present, so raw-form parsing is untouched."""
     matches = list(PERIOD_RE.finditer(zone_text))
+    if matches:
+        out = []
+        for i, m in enumerate(matches):
+            name = m.group(1).strip()
+            if name.upper().startswith("SYNOPSIS"):
+                continue
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(zone_text)
+            body = zone_text[start:end].split("$$")[0]
+            out.append((name, body))
+        return out
+
+    matches = list(STRIPPED_PERIOD_RE.finditer(zone_text))
     out = []
     for i, m in enumerate(matches):
         name = m.group(1).strip()
-        if name.upper().startswith("SYNOPSIS"):
-            continue
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(zone_text)
         body = zone_text[start:end].split("$$")[0]

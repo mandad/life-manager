@@ -1,16 +1,22 @@
 <#
 .SYNOPSIS
-  Read the ship's live NMEA position/nav off the LAN and HTTPS-POST it (plaintext JSON) to the relay.
+  Read the ship's live NMEA position/nav off the LAN and HTTPS-POST it (plaintext JSON) to Plotroom.
   User-space on a Windows work PC (PowerShell 5.1+, no admin, no install).
 
 .DESCRIPTION
   Position is public-equivalent (already on Windy by call sign), so no payload encryption — the POST
-  is token-gated over HTTPS so only you can write. The relay appends each push to a time-series DB
-  and serves the latest to the laptop.
+  is token-gated over HTTPS so only you can write. Plotroom stores the fix as the ship's live
+  position when it is newer than the one held, and keeps recent fixes on the vessel's track.
+
+  Primary target is Plotroom's POST /positions/push; the old DreamHost relay URL still works, since
+  the body and header are the same. Schedule every 1-5 min (Plotroom accepts one push per 5 s).
 
   Secrets from environment (set per-user with setx; do NOT hardcode):
-    $env:SHIP_RELAY_URL          e.g. https://yourdomain/scs/ship-relay.php
-    $env:SHIP_RELAY_PUSH_TOKEN   matches the relay's push token
+    $env:SHIP_RELAY_URL          https://plotroom.mandabot.com/positions/push
+                                 (dev: https://plotroom-86716600416.us-central1.run.app/positions/push,
+                                  reachable only through that run.app URL, and only past IAP)
+    $env:SHIP_RELAY_PUSH_TOKEN   the ship's token from Ship configuration > Vessel > Position push
+                                 (shown once when generated; Generate again to rotate, Revoke to stop)
 
 .PARAMETER NmeaMode   'UDP' (unicast/broadcast), 'Multicast', or 'TCP'. Default UDP.
 .PARAMETER NmeaPort   UDP/TCP port the ship broadcasts NMEA on (try 10110 first; see README discovery).

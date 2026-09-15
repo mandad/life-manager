@@ -46,6 +46,8 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:#[^|\]]*)?(?:\|[^\]]*)?\]\]")
 MDLINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s#][^)\s]*\.(?:md|csv))\)")
 TAG_RE = re.compile(r"(?<![\w/])#([A-Za-z][\w/-]*)")
 CHECKBOX_LINE_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(.+)$")
+# #43: same shape as CHECKBOX_LINE_RE but for completed (`- [x]`/`- [X]`) lines.
+DONE_CHECKBOX_LINE_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(.+)$")
 
 # ---------- #33 tag-census span masking (built 2026-08-04) ----------
 
@@ -309,8 +311,9 @@ def first_date(text: str, today: dt.date) -> dt.date | None:
 # ---------- #24 vague-date detector (built 2026-07-07) ----------
 # Targets written month-only / season / fuzzy never parse on the deadline
 # radar (precedent: the MMC "2026-07" renewal milestone went unsurfaced for
-# two months). Detect them on open task lines + headings in Projects/*/Tasks.md
-# so the /weekly anchoring pass (routine Step 7) has a worklist.
+# two months). Detect them on open task lines + headings in the radar corpus
+# (Projects/*/Tasks.md + CO Work Tasks.md since #55) so the /weekly anchoring pass
+# (routine Step 7) has a worklist.
 
 _MONTHS = (
     r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
@@ -375,6 +378,139 @@ def vague_dates_in(text: str, rel: str, today: dt.date) -> list[tuple[str, int, 
     return found
 
 
+# ---------- #43 --completed-since scan (built 2026-08-29) ----------
+# /weekly Step 8.1 source 2: what got DONE recently, for the work-log/OER pass.
+# Scoped to the same task-file convention as the deadline radar (Projects/*/
+# Tasks.md) plus CO Work Tasks.md, which carries the same `- [x] ... done
+# YYYY-MM-DD` convention but isn't named "Tasks.md" so the glob misses it.
+
+def completed_task_files(root: Path) -> list[Path]:
+    """Task files scanned by --completed-since: every Projects/*/Tasks.md plus
+    the CO Work Tasks.md special case."""
+    files = sorted(root.glob("Projects/*/Tasks.md"))
+    co_file = root / "Projects" / "Fairweather Command" / "CO Work Tasks.md"
+    if co_file.exists() and co_file not in files:
+        files.append(co_file)
+    return files
+
+
+def is_radar_task_file(path: Path) -> bool:
+    """#55 (built 2026-09-13): the deadline radar, the vague-date scan and the hedged-date
+    detector all use the SAME corpus as --completed-since — every Projects/*/Tasks.md plus
+    the CO Work Tasks.md special case. Before this, the CO's primary command backlog was
+    invisible to the radar: a hard external date (the FPW draft-agenda review, 9/25) sat
+    in CO Work Tasks for three days while the 30-day radar returned one item."""
+    return (("Projects" in path.parts and path.name == "Tasks.md")
+            or path.name == "CO Work Tasks.md")
+
+
+def completed_since(root: Path, since: dt.date, today: dt.date) -> list[tuple[str, int, str, dt.date]]:
+    """Every `- [x]` completed task line whose text carries a date within
+    [since, today] inclusive. Reuses DONE_CHECKBOX_LINE_RE (the completed-line
+    sibling of the radar's CHECKBOX_LINE_RE walker) and first_date() (the same
+    date parser the radar and vague-dates scan use) — run over the whole line
+    body, not deadline_scope(), since a completion stamp ("— done 2026-08-25")
+    normally lives in the annotation half of the line, not the bolded headline.
+    """
+    results: list[tuple[str, int, str, dt.date]] = []
+    for path in completed_task_files(root):
+        rel = path.relative_to(root)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for ln, line in enumerate(text.splitlines(), 1):
+            m = DONE_CHECKBOX_LINE_RE.match(line)
+            if not m:
+                continue
+            body = m.group(1)
+            d = first_date(body, today)
+            if d is None or not (since <= d <= today):
+                continue
+            snippet = body.strip()
+            if len(snippet) > 140:
+                snippet = snippet[:137] + "…"
+            results.append((str(rel), ln, snippet, d))
+    results.sort(key=lambda r: (r[3], r[0], r[1]))
+    return results
+
+
+# ---------- #45 hedged-date-with-urgency detector (built 2026-08-29) ----------
+# Enforces the memory rule (feedback_deadline_hardness) that an agent-supplied
+# hedged/approximate date must never carry urgency language. Runs over the
+# SAME corpus + headline scope as the deadline radar (Projects/*/Tasks.md + CO Work
+# Tasks.md since #55, deadline_scope()) so a hedge sitting only in resolved/history annotation
+# text — already superseded by a hardened headline date — doesn't re-fire.
+
+HEDGE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("by early/late/mid", re.compile(r"\bby\s+(?:early|late|mid)\b", re.IGNORECASE)),
+    ("~", re.compile(r"~")),
+    ("end of week", re.compile(r"\bend of (?:this |the )?week\b", re.IGNORECASE)),
+    ("end of month", re.compile(r"\bend of (?:this |the )?month\b", re.IGNORECASE)),
+    ("about", re.compile(r"\babout\b", re.IGNORECASE)),
+    ("around", re.compile(r"\baround\b", re.IGNORECASE)),
+    ("target", re.compile(r"\btarget\b", re.IGNORECASE)),
+    ("maybe", re.compile(r"\bmaybe\b", re.IGNORECASE)),
+    ("early <month>", re.compile(rf"\bearly\s+(?:{_MONTHS})\b", re.IGNORECASE)),
+    ("late <month>", re.compile(rf"\blate\s+(?:{_MONTHS})\b", re.IGNORECASE)),
+    ("mid <month>", re.compile(rf"\bmid\s+(?:{_MONTHS})\b", re.IGNORECASE)),
+]
+
+# "DUE"/"MUST" match case-sensitively — these read as deliberate emphasis
+# (all-caps) in this vault's convention; lowercase "due"/"must" are common
+# incidental English and would flood the report. "hard"/"deadline"/"OVERDUE"
+# carry little of that casual-usage risk, so those stay case-insensitive.
+URGENCY_MARKERS: list[tuple[str, re.Pattern]] = [
+    ("⏰", re.compile(r"⏰")),
+    ("🔴", re.compile(r"🔴")),
+    ("DUE", re.compile(r"\bDUE\b")),
+    ("hard", re.compile(r"\bhard\b", re.IGNORECASE)),
+    ("deadline", re.compile(r"\bdeadline\b", re.IGNORECASE)),
+    ("MUST", re.compile(r"\bMUST\b")),
+    ("OVERDUE", re.compile(r"\bOVERDUE\b", re.IGNORECASE)),
+]
+
+
+def hedged_urgency_hits(root: Path, today: dt.date) -> list[tuple[str, int, str, str, str]]:
+    """Flag task-line headlines pairing a hedge with urgency language.
+
+    Returns (path, line_no, hedge_phrase, date_text, urgency_token). date_text
+    is the resolved calendar date when deadline_scope() carries a day-anchored
+    date alongside the hedge (e.g. "~8/25" -> the resolved ISO date), else the
+    hedge match text itself (e.g. "early September" has no day number to
+    resolve, so the fuzzy phrase IS the date being reported).
+    """
+    hits: list[tuple[str, int, str, str, str]] = []
+    for path in completed_task_files(root):  # #55: same corpus as the radar
+        rel = path.relative_to(root)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for ln, line in enumerate(text.splitlines(), 1):
+            m = CHECKBOX_LINE_RE.match(line)
+            if not m:
+                continue
+            body = m.group(1)
+            if is_radar_resolved(body):
+                continue
+            scope = deadline_scope(body)
+            hedge_label = None
+            hedge_match = None
+            for label, rx in HEDGE_PATTERNS:
+                hm = rx.search(scope)
+                if hm:
+                    hedge_label, hedge_match = label, hm
+                    break
+            if hedge_match is None:
+                continue
+            urgency_label = None
+            for label, rx in URGENCY_MARKERS:
+                if rx.search(body):
+                    urgency_label = label
+                    break
+            if urgency_label is None:
+                continue
+            d = first_date(scope, today)
+            date_text = d.isoformat() if d is not None else hedge_match.group(0)
+            hits.append((str(rel), ln, hedge_label, date_text, urgency_label))
+    return hits
+
+
 # ---------- vault scanning ----------
 
 def walk_md(root: Path):
@@ -437,6 +573,7 @@ def scan(root: Path, today: dt.date) -> dict:
     filtered_count = 0
     inbound: dict[Path, set[Path]] = defaultdict(set)
     tag_counts: Counter = Counter()
+    tag_locations: dict[str, list[tuple[str, int]]] = defaultdict(list)
     tag_census_skipped = 0
     tag_census_suppressed = 0
     folder_counts: Counter = Counter()
@@ -482,12 +619,18 @@ def scan(root: Path, today: dt.date) -> dict:
             # unmasked for the wikilink/inbound-link scan above.
             census_text = mask_census_spans(text)
             for m in TAG_RE.finditer(census_text):
-                tag_counts[m.group(1)] += 1
+                tag = m.group(1)
+                tag_counts[tag] += 1
+                # #44: line number computed from the masked copy's own
+                # newlines, so it stays consistent with what was actually
+                # counted (the census pass, not raw `text`).
+                line_no = census_text.count("\n", 0, m.start()) + 1
+                tag_locations[tag].append((str(rel), line_no))
             tag_census_suppressed += (
                 len(TAG_RE.findall(text)) - len(TAG_RE.findall(census_text))
             )
 
-        if "Projects" in path.parts and path.name == "Tasks.md":
+        if is_radar_task_file(path):
             vague_dates.extend(vague_dates_in(text, str(rel), today))
             for ln, line in enumerate(text.splitlines(), 1):
                 m = CHECKBOX_LINE_RE.match(line)
@@ -502,12 +645,19 @@ def scan(root: Path, today: dt.date) -> dict:
                     delta = (d - today).days
                     open_dated.append((d, delta, str(rel), ln, body.strip()))
 
+    # #44: keep locations only for tags whose FINAL count is <=2 — bounds the
+    # report to the tags actually worth eyeballing rather than every tag.
+    tag_low_count_locations = {
+        tag: locs for tag, locs in tag_locations.items() if tag_counts[tag] <= 2
+    }
+
     return {
         "by_basename": by_basename,
         "broken": broken,
         "filtered_count": filtered_count,
         "inbound": inbound,
         "tag_counts": tag_counts,
+        "tag_low_count_locations": tag_low_count_locations,
         "tag_census_skipped": tag_census_skipped,
         "tag_census_suppressed": tag_census_suppressed,
         "folder_counts": folder_counts,
@@ -637,6 +787,15 @@ def render(today: dt.date, scan_result: dict) -> str:
             out.append(f"| `#{tag}` | {count} |")
     else:
         out.append("_No tags found._")
+    out.append("")
+    out.append("**Low-count tags — locations (used ≤2 times):**")
+    low = scan_result.get("tag_low_count_locations", {})
+    if low:
+        for tag in sorted(low):
+            locs = ", ".join(f"`{p}:{ln}`" for p, ln in low[tag])
+            out.append(f"- `#{tag}` — {locs}")
+    else:
+        out.append("_None._")
     if scan_result.get("tag_census_skipped"):
         out.append("")
         out.append(f"_(tag census skipped {scan_result['tag_census_skipped']} meta-doc files)_")
@@ -680,7 +839,7 @@ def render(today: dt.date, scan_result: dict) -> str:
     out.append("")
 
     # Deadline radar
-    out.append("## Deadline radar — open dated tasks in Projects/*/Tasks.md\n")
+    out.append("## Deadline radar — open dated tasks in Projects/*/Tasks.md + CO Work Tasks.md\n")
     out.append("Buckets: past due → this week (0–7) → next 30 (8–30) → future (> 30).\n")
     if scan_result.get("radar_suppressed"):
         out.append(f"_(#29 filter suppressed {scan_result['radar_suppressed']} "
@@ -712,6 +871,22 @@ def render(today: dt.date, scan_result: dict) -> str:
                 out.append(f"- `{date.isoformat()}` ({delta:+d}d) — `{path}:{ln}` — {snippet}")
         out.append("")
 
+    # Hedged dates carrying urgency language (#45)
+    out.append("## Hedged dates carrying urgency language\n")
+    out.append("A hedge (`~`, \"about\", \"target\", \"early/mid/late <month>\", …) paired with "
+               "an urgency marker (⏰, 🔴, DUE, hard, deadline, MUST, OVERDUE) on the same "
+               "headline — enforces the rule that an agent-supplied approximate date must "
+               "never carry urgency language.\n")
+    hedge_hits = hedged_urgency_hits(VAULT, today)
+    if hedge_hits:
+        out.append("| Source | Hedge | Date | Urgency |")
+        out.append("|---|---|---|---|")
+        for rel, ln, hedge_label, date_text, urgency_label in hedge_hits:
+            out.append(f"| `{rel}:{ln}` | {hedge_label} | {date_text} | {urgency_label} |")
+    else:
+        out.append("_None._")
+    out.append("")
+
     return "\n".join(out)
 
 
@@ -722,8 +897,9 @@ def render_radar_only(today: dt.date, scan_result: dict, horizon: int) -> str:
     files, and that missed a dated item for FOUR consecutive runs — the HOA-fee verification
     due 8/10, captured into a NEWLY created project folder (Personal Admin, 8/04) that was
     never in the agent's habitual sweep set. Discovery is mechanical and globs
-    `Projects/*/Tasks.md`, so a new project is covered the day it exists; only bucketing and
-    prioritisation need judgment, and those stay with the agent."""
+    `Projects/*/Tasks.md` plus `CO Work Tasks.md` (#55, 2026-09-13), so a new project is
+    covered the day it exists; only bucketing and prioritisation need judgment, and those
+    stay with the agent."""
     rows = [r for r in scan_result["open_dated"] if r[1] <= horizon]
     out = [f"# Deadline radar — next {horizon} days (as of {today.isoformat()})", ""]
     if scan_result.get("radar_suppressed"):
@@ -751,6 +927,18 @@ def render_radar_only(today: dt.date, scan_result: dict, horizon: int) -> str:
     return "\n".join(out)
 
 
+def render_completed_since(since: dt.date, today: dt.date,
+                           rows: list[tuple[str, int, str, dt.date]]) -> str:
+    """#43: `path:line — snippet (date)` listing for /weekly Step 8.1 source 2."""
+    out = [f"# Completed since {since.isoformat()} (through {today.isoformat()})", ""]
+    if not rows:
+        out.append("_None._")
+    else:
+        for rel, ln, snippet, d in rows:
+            out.append(f"{rel}:{ln} — {snippet} ({d.isoformat()})")
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Pre-compute mechanical inputs for /weekly.")
     ap.add_argument("--out", help="Write report to this path instead of stdout.")
@@ -759,6 +947,10 @@ def main() -> None:
                     help="Print ONLY the dated-task deadline radar (for the /daily Step-5 sweep).")
     ap.add_argument("--horizon", type=int, default=7,
                     help="Days ahead to include with --radar-only (default 7).")
+    ap.add_argument("--completed-since", metavar="DATE",
+                    help="Print ONLY completed (`- [x]`) task lines carrying a completion "
+                         "date within [DATE, --today] inclusive, across Projects/*/Tasks.md "
+                         "and CO Work Tasks.md (YYYY-MM-DD).")
     args = ap.parse_args()
 
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
@@ -766,9 +958,14 @@ def main() -> None:
         print(f"Vault directory not found: {VAULT}", file=sys.stderr)
         sys.exit(1)
 
-    result = scan(VAULT, today)
-    report = (render_radar_only(today, result, args.horizon) if args.radar_only
-              else render(today, result))
+    if args.completed_since:
+        since = dt.date.fromisoformat(args.completed_since)
+        rows = completed_since(VAULT, since, today)
+        report = render_completed_since(since, today, rows)
+    else:
+        result = scan(VAULT, today)
+        report = (render_radar_only(today, result, args.horizon) if args.radar_only
+                  else render(today, result))
 
     if args.out:
         out_path = Path(args.out)

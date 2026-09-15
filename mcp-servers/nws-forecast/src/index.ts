@@ -10,7 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import axios, { AxiosError } from "axios";
+import axios from "axios";
 
 const API_BASE_URL = "https://api.weather.gov";
 const USER_AGENT =
@@ -511,6 +511,33 @@ Errors:
   },
 );
 
+/** Resolve a lat/lon to its containing NWS marine zone (e.g. PKZ500), or null if the point
+ *  is not in marine coverage (most likely land). Shared by nws_get_alerts (zone-alert
+ *  fallback, automation #46) and nws_get_marine_forecast (zone forecast text). */
+async function resolveMarineZone(
+  lat: number,
+  lon: number,
+): Promise<{ id: string; name: string } | null> {
+  const data = await nwsRequest<MarineZonesResponse>(
+    `/zones?type=marine&point=${lat.toFixed(4)},${lon.toFixed(4)}`,
+  );
+  const f = data.features?.[0];
+  return f ? { id: f.properties.id, name: f.properties.name } : null;
+}
+
+/** Active alerts for a marine zone directly (as opposed to a point). A zone with nothing
+ *  active returns an empty features array from NWS; a genuine failure (network, 5xx, or the
+ *  zone lookup itself) is swallowed here so the caller can fall back to point-based results
+ *  rather than crash the tool (automation #46). */
+async function fetchZoneAlerts(zoneId: string): Promise<AlertFeature[]> {
+  try {
+    const data = await nwsRequest<AlertsResponse>(`/alerts/active/zone/${zoneId}`);
+    return data.features ?? [];
+  } catch {
+    return [];
+  }
+}
+
 const AlertsSchema = z
   .object({
     ...LatLonSchema,
@@ -525,6 +552,13 @@ server.registerTool(
     description: `Fetch active NWS alerts (watches, warnings, advisories) covering a lat/lon. Returns the empty list if nothing is active.
 
 Use this before outdoor plans, before flights, or to surface conditions worth knowing about during /daily.
+
+Marine-zone fallback (automation #46): if the point-based query returns zero alerts, this also
+resolves the point's containing NWS marine zone (same zone-resolution logic as
+nws_get_marine_forecast, e.g. PKZ500) and checks that zone's active alerts directly. Marine
+products like Small Craft Advisories are sometimes keyed to the zone's coastal-waters text and
+don't show up on a strict point query. Each returned alert is labeled with which path produced
+it ('point' or 'zone'); point-based alerts are never dropped.
 
 Args:
   - lat (number): decimal latitude.
@@ -546,9 +580,13 @@ Returns (structuredContent):
         "effective": string,
         "expires": string,
         "description": string,
-        "instruction": string | null
+        "instruction": string | null,
+        "source": "point" | "zone"            // which query produced this alert
       }
-    ]
+    ],
+    "marine_zone_checked": { "id": string, "name": string } | null
+                                               // set only when the point query returned zero
+                                               // and a marine-zone fallback check ran
   }`,
     inputSchema: AlertsSchema.shape,
     annotations: {
@@ -560,10 +598,7 @@ Returns (structuredContent):
   },
   async (params) => {
     try {
-      const data = await nwsRequest<AlertsResponse>(
-        `/alerts/active?point=${params.lat.toFixed(4)},${params.lon.toFixed(4)}`,
-      );
-      const alerts = (data.features ?? []).map((f) => ({
+      const toAlertSummary = (f: AlertFeature, source: "point" | "zone") => ({
         id: f.properties.id,
         event: f.properties.event,
         severity: f.properties.severity,
@@ -575,20 +610,68 @@ Returns (structuredContent):
         expires: f.properties.expires,
         description: f.properties.description,
         instruction: f.properties.instruction ?? null,
-      }));
-      const output = { count: alerts.length, alerts };
+        source,
+      });
+
+      const data = await nwsRequest<AlertsResponse>(
+        `/alerts/active?point=${params.lat.toFixed(4)},${params.lon.toFixed(4)}`,
+      );
+      const pointFeatures = data.features ?? [];
+
+      // Marine-zone fallback (automation #46, same defect class as #37): a point-based query
+      // can come back empty while an active alert (e.g. a Small Craft Advisory) sits in the
+      // containing marine zone's own alert feed. Only triggers when the point query is empty,
+      // so the common land case pays no extra latency. Point alerts are always kept.
+      let zoneInfo: { id: string; name: string } | null = null;
+      let zoneFeatures: AlertFeature[] = [];
+      if (pointFeatures.length === 0) {
+        try {
+          zoneInfo = await resolveMarineZone(params.lat, params.lon);
+        } catch {
+          zoneInfo = null; // not in marine coverage, or the zone lookup itself failed
+        }
+        if (zoneInfo) {
+          zoneFeatures = await fetchZoneAlerts(zoneInfo.id);
+        }
+      }
+
+      const seen = new Set<string>();
+      const alerts: ReturnType<typeof toAlertSummary>[] = [];
+      for (const f of pointFeatures) {
+        const a = toAlertSummary(f, "point");
+        if (seen.has(a.id)) continue;
+        seen.add(a.id);
+        alerts.push(a);
+      }
+      for (const f of zoneFeatures) {
+        const a = toAlertSummary(f, "zone");
+        if (seen.has(a.id)) continue;
+        seen.add(a.id);
+        alerts.push(a);
+      }
+
+      const output = { count: alerts.length, alerts, marine_zone_checked: zoneInfo };
 
       let text: string;
       if (params.response_format === ResponseFormat.MARKDOWN) {
         if (!alerts.length) {
           text = `# NWS alerts — none active for ${params.lat},${params.lon}`;
+          if (zoneInfo) {
+            text += `\n(also checked marine zone ${zoneInfo.id} — ${zoneInfo.name} — no active zone alerts either)`;
+          }
         } else {
           const lines: string[] = [
             `# NWS alerts — ${alerts.length} active for ${params.lat},${params.lon}`,
             "",
           ];
+          if (zoneInfo) {
+            lines.push(
+              `_Point query alone returned none; also checked marine zone ${zoneInfo.id} (${zoneInfo.name}) — alerts below are labeled by source._`,
+            );
+            lines.push("");
+          }
           for (const a of alerts) {
-            lines.push(`## ${a.event} (${a.severity}/${a.urgency})`);
+            lines.push(`## ${a.event} (${a.severity}/${a.urgency}) [${a.source}]`);
             lines.push(`- area: ${a.area}`);
             lines.push(`- effective ${a.effective} → expires ${a.expires}`);
             if (a.headline) lines.push(`- ${a.headline}`);
@@ -614,17 +697,6 @@ Returns (structuredContent):
     }
   },
 );
-
-async function resolveMarineZone(
-  lat: number,
-  lon: number,
-): Promise<{ id: string; name: string } | null> {
-  const data = await nwsRequest<MarineZonesResponse>(
-    `/zones?type=marine&point=${lat.toFixed(4)},${lon.toFixed(4)}`,
-  );
-  const f = data.features?.[0];
-  return f ? { id: f.properties.id, name: f.properties.name } : null;
-}
 
 function officeFromUrl(url: string): string {
   // "https://api.weather.gov/offices/ALU" -> "ALU"
