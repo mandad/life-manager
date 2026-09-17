@@ -2,9 +2,11 @@
 .SYNOPSIS
   Read the ship's live NMEA position/nav off the LAN and HTTPS-POST it (plaintext JSON) to Plotroom.
   User-space on a Windows work PC (PowerShell 5.1+, no admin, no install).
+  Keep this file ASCII-only. Windows PowerShell 5.1 reads a BOM-less file as the ANSI code page,
+  and a UTF-8 em-dash decodes to a smart quote that terminates the enclosing string.
 
 .DESCRIPTION
-  Position is public-equivalent (already on Windy by call sign), so no payload encryption — the POST
+  Position is public-equivalent (already on Windy by call sign), so no payload encryption; the POST
   is token-gated over HTTPS so only you can write. Plotroom stores the fix as the ship's live
   position when it is newer than the one held, and keeps recent fixes on the vessel's track.
 
@@ -13,8 +15,8 @@
 
   Secrets from environment (set per-user with setx; do NOT hardcode):
     $env:SHIP_RELAY_URL          https://plotroom.mandabot.com/positions/push
-                                 (dev: https://plotroom-86716600416.us-central1.run.app/positions/push,
-                                  reachable only through that run.app URL, and only past IAP)
+                                 (production only: the dev instance is behind IAP and answers a
+                                  token-only push with a sign-in redirect, never a stored fix)
     $env:SHIP_RELAY_PUSH_TOKEN   the ship's token from Ship configuration > Vessel > Position push
                                  (shown once when generated; Generate again to rotate, Revoke to stop)
 
@@ -53,6 +55,9 @@ function ConvertTo-Decimal {
 function Parse-Nmea {
   param([string[]]$Lines)
   $r = @{ lat=$null; lon=$null; sog_kt=$null; cog=$null; heading=$null }
+  # Heading candidates, best first: true (HDT/THS), true derived from HDG's own
+  # variation, magnetic (HDG without variation, HDM) corrected by RMC variation.
+  $hdgTrue = $null; $hdgFromHdg = $null; $hdgMag = $null; $variation = $null
   foreach ($line in $Lines) {
     $l = $line.Trim()
     if ($l.Length -lt 6 -or $l[0] -ne '$') { continue }
@@ -66,13 +71,25 @@ function Parse-Nmea {
       'RMC' { if ($f.Count -ge 9 -and $f[2] -eq 'A') {
                 if ($null -eq $r.lat) { $r.lat = ConvertTo-Decimal $f[3] $f[4] 2; $r.lon = ConvertTo-Decimal $f[5] $f[6] 3 }
                 if ($f[7]) { $r.sog_kt = [double]$f[7] }
-                if ($f[8]) { $r.cog = [double]$f[8] } } }
+                if ($f[8]) { $r.cog = [double]$f[8] }
+                if ($f.Count -ge 12 -and $f[10]) { $variation = [double]$f[10] * $(if ($f[11] -eq 'W') { -1 } else { 1 }) } } }
       'VTG' { if ($f.Count -ge 6) {
                 if ($f[1]) { $r.cog = [double]$f[1] }
                 if ($f[5]) { $r.sog_kt = [double]$f[5] } } }
-      'HDT' { if ($f.Count -ge 2 -and $f[1]) { $r.heading = [double]$f[1] } }
+      'HDT' { if ($f.Count -ge 2 -and $f[1]) { $hdgTrue = [double]$f[1] } }
+      'THS' { if ($f.Count -ge 3 -and $f[1] -and $f[2] -ne 'V') { $hdgTrue = [double]$f[1] } }
+      'HDG' { if ($f.Count -ge 2 -and $f[1]) {
+                $h = [double]$f[1]
+                if ($f.Count -ge 4 -and $f[2]) { $h += [double]$f[2] * $(if ($f[3] -eq 'W') { -1 } else { 1 }) }
+                if ($f.Count -ge 6 -and $f[4]) { $hdgFromHdg = $h + [double]$f[4] * $(if ($f[5] -eq 'W') { -1 } else { 1 }) }
+                else { $hdgMag = $h } } }
+      'HDM' { if ($f.Count -ge 2 -and $f[1]) { $hdgMag = [double]$f[1] } }
     }
   }
+  $h = $hdgTrue
+  if ($null -eq $h) { $h = $hdgFromHdg }
+  if ($null -eq $h -and $null -ne $hdgMag -and $null -ne $variation) { $h = $hdgMag + $variation }
+  if ($null -ne $h) { $r.heading = [Math]::Round((($h % 360) + 360) % 360, 1) }
   return $r
 }
 
@@ -96,14 +113,25 @@ function Receive-Nmea {
     $udp.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($Bind), $Port)))
     if ($Mode -eq 'Multicast' -and $Group) { $udp.JoinMulticastGroup([System.Net.IPAddress]::Parse($Group)) }
     $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+    $datagrams = 0
     while ((Get-Date) -lt $deadline) {
       try {
         $bytes = $udp.Receive([ref]$remote)
+        $datagrams++
         $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-        foreach ($ln in ($text -split "`r?`n")) { if ($ln) { $lines.Add($ln) } }
+        $head = ($text.Substring(0, [Math]::Min(40, $text.Length))) -replace '[\r\n]+', ' '
+        Write-Verbose ("datagram {0} from {1}: {2} bytes: {3}" -f $datagrams, $remote, $bytes.Length, $head)
+        # Split on any run of CR/LF: some feeds terminate with a bare CR or send CR CR LF.
+        foreach ($ln in ($text -split "[`r`n]+")) { if ($ln) { $lines.Add($ln) } }
       } catch { }
     }
     $udp.Close()
+    if ($datagrams -eq 0) {
+      Write-Warning (("No UDP datagrams reached {0}:{1} in {2} s, so nothing was parsed. Likely causes: " +
+        "Windows Firewall has no inbound rule for powershell.exe (another NMEA program may have one); " +
+        "the feed is unicast and another program bound the port first (close it and retry); " +
+        "or wrong port/mode. Re-run with -Verbose to see datagrams as they arrive.") -f $Bind, $Port, $Seconds)
+    }
   }
   return $lines
 }
@@ -126,7 +154,7 @@ $payload = [ordered]@{
 }
 $json = ($payload | ConvertTo-Json -Compress)
 
-if ($DryRun) { Write-Host "DryRun ($($lines.Count) NMEA lines) — would POST:"; Write-Host $json; exit 0 }
+if ($DryRun) { Write-Host "DryRun ($($lines.Count) NMEA lines) - would POST:"; Write-Host $json; exit 0 }
 
 $url   = $env:SHIP_RELAY_URL
 $token = $env:SHIP_RELAY_PUSH_TOKEN

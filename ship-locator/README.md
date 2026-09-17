@@ -7,7 +7,7 @@ which stores it as the ship's live position and keeps the recent fixes on the ve
 [ship work PC, user-space]                    [Plotroom]
 push-position.ps1                              POST /positions/push
   read NMEA off ship LAN (UDP/TCP)               X-Push-Token → the ship (hashed lookup)
-  parse $GPGGA/$GPRMC/$GPVTG/$HEHDT              newer fix wins → live Ship positions marker
+  parse GGA/RMC/VTG + HDT/THS/HDG/HDM heading    newer fix wins → live Ship positions marker
   POST plaintext JSON ───────HTTPS 443────────►  + a track point, trimmed at 24 h and
                                                    wherever the nightly SAMOS import reaches
 ```
@@ -29,13 +29,16 @@ OPS, XO), or an administrator, and press **Generate**. The token and the address
 together, once. Copy both now — the token is never shown again, and pressing **Generate** later
 replaces it and kills the old one. **Revoke** turns the direct feed off.
 
-| Instance | Post to |
-| --- | --- |
-| Production | `https://plotroom.mandabot.com/positions/push` |
-| Dev | `https://plotroom-86716600416.us-central1.run.app/positions/push` |
+Post to production only:
 
-The dev instance has no custom domain and sits behind IAP, so its `run.app` URL is the only way in
-and IAP has to admit the caller before a push lands. Ship pushes belong on production.
+```
+https://plotroom.mandabot.com/positions/push
+```
+
+The dev instance sits behind IAP (Cloud Run's own, so its `run.app` URL is covered too): a push
+carrying only the token gets a sign-in redirect, never a stored fix. Dev testing is done from the
+laptop with a service-account JWT (see Plotroom's docs/operations/SHIP_RELAY.md); the ship task
+never targets dev.
 
 ### 2. Ship work PC (no admin)
 ```powershell
@@ -93,11 +96,13 @@ schtasks /Delete /TN "ShipPositionPush" /F
   was recorded on the track but was older than the live fix already held.
 
 ## Troubleshooting
+- **0 NMEA lines (UDP):** nothing reached the socket. Re-run with `-Verbose`: no datagrams means the Windows Firewall has no inbound rule for `powershell.exe` (a nav program installed with admin has one), or the feed is unicast and that program bound the port first (close it and retry). Workaround with no admin: connect to a TCP NMEA repeater instead (`-NmeaMode TCP -NmeaHost <ip> -NmeaPort <port>`), since outbound connections are not firewalled.
+- **Heading null:** the feed carries no HDT/THS/HDG/HDM sentence (an `$ECRMC` repeater gives position, SOG and COG only). Enable heading output on the repeater's port, or listen to the raw gyro/GPS broadcast.
 - **No fix parsed:** wrong port/mode — re-run the sniff or ask SCS techs; some ships emit only RMC (handled) or multicast/TCP.
 - **POST 401:** the token does not match any ship — it was rotated or revoked in Ship configuration. Generate a fresh one and `setx` it again.
 - **POST 429:** with a valid token this only ever means pushes are coming faster than one accepted push per 5 seconds (the rate limiter that repeated bad tokens trip never holds up a valid one). Honour the `Retry-After` header.
 - **POST 422:** the parsed fix is out of range (including a non-finite `sog_kt`, which a bad VTG parse can produce), or the `utc` is more than 5 minutes in the future — check the PC's clock. A 422 does not cost the next push its 5-second slot.
-- **Nothing at all:** the ship is off the network, or the URL points at the dev instance, which IAP blocks.
+- **Nothing at all (or a 302):** the ship is off the network, or the URL points at the dev instance, which IAP blocks.
 
 ## Legacy: the DreamHost relay
 `relay/ship-relay.php` + `relay/.htaccess` under the domain, configured by `ship-relay.config.php`
