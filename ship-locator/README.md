@@ -72,9 +72,15 @@ often than the old 30-minute relay cadence. Plotroom refuses more than one push 
 seconds, and a 1–5 minute task is nowhere near that:
 ```powershell
 schtasks /Create /SC MINUTE /MO 5 /TN "ShipPositionPush" ^
-  /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\path\to\push-position.ps1 -NmeaMode UDP -NmeaPort 10110"
+  /TR "wscript.exe \"C:\path\to\run-hidden.vbs\" -NmeaMode UDP -NmeaPort 10110"
 ```
-Already have the old 30-minute task? Delete and recreate it:
+`run-hidden.vbs` (next to the script) starts PowerShell with no window and passes the arguments
+through. Pointing the task straight at `powershell -WindowStyle Hidden` flashes a console window
+on every run: a task created by a standard user runs only in the logged-on desktop, and
+powershell.exe opens its window before it reads that switch. The other no-admin fix is the task's
+"Run whether user is logged on or not" setting, which some domain policies refuse.
+
+Already have the old task (30-minute cadence, or the visible-window action)? Delete and recreate it:
 ```powershell
 schtasks /Delete /TN "ShipPositionPush" /F
 ```
