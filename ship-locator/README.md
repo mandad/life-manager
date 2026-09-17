@@ -71,19 +71,24 @@ Direct pushes exist to make the marker minutes old rather than hours, so run the
 often than the old 30-minute relay cadence. Plotroom refuses more than one push per ship every 5
 seconds, and a 1–5 minute task is nowhere near that:
 ```powershell
-schtasks /Create /SC MINUTE /MO 5 /TN "ShipPositionPush" ^
-  /TR "wscript.exe \"C:\path\to\run-hidden.vbs\" -NmeaMode UDP -NmeaPort 10110"
+schtasks /Create /F /SC MINUTE /MO 5 /TN "ShipPositionPush" /TR "wscript.exe C:\dev\run-hidden.vbs -NmeaMode TCP -NmeaHost 10.0.0.5 -NmeaPort 23"
 ```
+One line, from PowerShell, no quotes inside the `/TR` value (keep the script in a path without
+spaces). `/F` replaces an existing task of that name. A path with spaces needs escaped quotes,
+which PowerShell mangles unless the rest of the line is passed verbatim with `--%`:
+```powershell
+schtasks --% /Create /F /SC MINUTE /MO 5 /TN "ShipPositionPush" /TR "wscript.exe \"C:\my tools\run-hidden.vbs\" -NmeaMode TCP -NmeaHost 10.0.0.5 -NmeaPort 23"
+```
+Check what was stored with `schtasks /Query /TN "ShipPositionPush" /XML` (the `Command` and
+`Arguments` elements); "Invalid argument/option -NmeaMode" on create means the quoting broke and
+schtasks read the script's switches as its own.
+
 `run-hidden.vbs` (next to the script) starts PowerShell with no window and passes the arguments
 through. Pointing the task straight at `powershell -WindowStyle Hidden` flashes a console window
 on every run: a task created by a standard user runs only in the logged-on desktop, and
 powershell.exe opens its window before it reads that switch. The other no-admin fix is the task's
 "Run whether user is logged on or not" setting, which some domain policies refuse.
 
-Already have the old task (30-minute cadence, or the visible-window action)? Delete and recreate it:
-```powershell
-schtasks /Delete /TN "ShipPositionPush" /F
-```
 
 ### 4. Verify
 - Ship: real run → `Pushed <lat>,<lon> (N NMEA lines) at <utc>`.
