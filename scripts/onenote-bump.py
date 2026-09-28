@@ -19,7 +19,13 @@ behaviour for watchlisted pages that are still inside the hash window).
 Usage
   python3 scripts/onenote-bump.py --date 2026-09-08 --rows "CME Notes" "Nome Cab" …
   python3 scripts/onenote-bump.py --date 2026-09-08 --rows-file /path/list.txt   # one title per line
+  python3 scripts/onenote-bump.py --date 2026-09-26 --all --exclude "Room Layout" "Buy Wish List"
   add --write to apply; without it the script is a dry run.
+  --all             name EVERY row of the Stored-page-hashes table (automation #57, 2026-09-26)
+                    — replaces the hand-rolled awk rows-file. `--exclude` is the only opt-out:
+                    list the frozen rows and the day's hand-handled edited page there. The
+                    excluded set is printed, and an --exclude title that matches no row is an
+                    error (exit 1, nothing written), same as a missing --rows title.
   --days-static N   also rewrites a "(walked; unchanged since … — N days)" style
                     annotation's day count on CME-Relief-type cells (optional).
 
@@ -68,6 +74,10 @@ def main() -> int:
     ap.add_argument("--date", required=True, help="YYYY-MM-DD to write into the Last checked cell")
     ap.add_argument("--rows", nargs="*", default=[], help="page titles to bump")
     ap.add_argument("--rows-file", help="file with one page title per line (# comments ok)")
+    ap.add_argument("--all", action="store_true",
+                    help="name every row of the Stored-page-hashes table (use --exclude to opt rows out)")
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="with --all: page titles to leave untouched (frozen rows, hand-handled edits)")
     ap.add_argument("--file", default=str(DEFAULT_FILE), help="path to onenote-sync-state.md")
     ap.add_argument("--write", action="store_true", help="apply the change (default: dry run)")
     ap.add_argument("--days-static", type=int, help="rewrite an 'N days' annotation on matched cells")
@@ -75,6 +85,18 @@ def main() -> int:
 
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
         print(f"ERROR: --date must be YYYY-MM-DD, got {args.date!r}")
+        return 2
+
+    if args.all and (args.rows or args.rows_file):
+        print("ERROR: --all names every hash-table row; don't combine it with --rows/--rows-file.")
+        return 2
+    if args.exclude and not args.all:
+        print("ERROR: --exclude only applies with --all (with --rows, just leave the title out).")
+        return 2
+    if args.all and args.days_static is not None:
+        # --days-static rewrites the first "N days" in EVERY bumped cell — with --all that
+        # corrupts unrelated annotations ("~1–2 days" → "~1–78 days", caught 2026-09-26).
+        print("ERROR: --days-static is for one named row (e.g. --rows \"CME Relief\"); never with --all.")
         return 2
 
     wanted: list[str] = list(args.rows)
@@ -87,11 +109,6 @@ def main() -> int:
         except OSError as e:
             print(f"ERROR: cannot read --rows-file: {e}")
             return 2
-    if not wanted:
-        print("ERROR: no rows named (use --rows or --rows-file); refusing to bump anything.")
-        return 2
-    wanted_norm = {norm(t): t for t in wanted}
-
     path = Path(args.file)
     try:
         text = path.read_text(encoding="utf-8")
@@ -99,6 +116,28 @@ def main() -> int:
         print(f"ERROR: cannot read {path}: {e}")
         return 2
     lines = text.split("\n")
+
+    excluded: list[str] = []
+    if args.all:
+        table: dict[str, str] = {}      # norm title -> display title, hash-table rows only
+        for line in lines:
+            cells = split_row(line)
+            if cells and cells[0].strip().startswith("`"):
+                table.setdefault(norm(cells[1]), cells[1].strip())
+        bad = [t for t in args.exclude if norm(t) not in table]
+        if bad:
+            for t in bad:
+                print(f"  MISSING exclude {t!r}: no Stored-page-hashes row with that title")
+            print("  → nothing written: fix the --exclude title(s) first.")
+            return 1
+        excl_norm = {norm(t) for t in args.exclude}
+        excluded = [table[t] for t in table if t in excl_norm]
+        wanted = [table[t] for t in table if t not in excl_norm]
+
+    if not wanted:
+        print("ERROR: no rows named (use --rows, --rows-file or --all); refusing to bump anything.")
+        return 2
+    wanted_norm = {norm(t): t for t in wanted}
 
     def count_ending(date: str) -> int:
         return sum(1 for l in lines if l.rstrip().endswith(f"{date} |"))
@@ -137,6 +176,9 @@ def main() -> int:
 
     mode = "WRITE" if args.write else "DRY RUN"
     print(f"onenote-bump [{mode}] → {path.name} · date {args.date}")
+    if args.all:
+        print(f"  --all: {len(wanted_norm)} hash-table titles named · excluded ({len(excluded)}): "
+              + (", ".join(repr(t) for t in excluded) or "none"))
     for t, old, new in changed:
         print(f"  bump   {t!r}: {old} → {new}")
     for t, why in skipped:
