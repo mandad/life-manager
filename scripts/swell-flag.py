@@ -76,7 +76,7 @@ import re
 import sys
 import urllib.request
 
-UA = "swell-flag/1.0 (NOAA Ship Fairweather /daily; accounts@dmanda.com)"
+UA = "swell-flag/1.0"  # generic on purpose: no name, project or contact address goes to an outside service (#66)
 API = "https://api.weather.gov"
 
 ZONE_HEADER_RE = re.compile(r"^(PKZ\d{3})-", re.M)
@@ -216,13 +216,22 @@ def _get_json(url, timeout):
         return json.loads(r.read())
 
 
-def _latest_product_text(ptype, location, timeout):
+def _recent_product_texts(ptype, location, timeout):
+    """Text of the newest product under each WMO header at this location, newest first. One
+    location can issue several products under one type: AJK sends the inside waters (FZAK51) and
+    the outer coast (PKZ641/642) as separate CWFs, and the inside-waters one is re-issued often
+    enough to fill the top of the list, so the newest product alone misses the outer coast
+    (#65, 2026-11-17)."""
     lst = _get_json(f"{API}/products/types/{ptype}/locations/{location}", timeout)
     graph = lst.get("@graph") or []
-    if not graph:
-        return ""
     graph.sort(key=lambda p: p.get("issuanceTime") or "", reverse=True)
-    return _get_json(graph[0]["@id"], timeout).get("productText", "") or ""
+    seen = set()
+    for p in graph:
+        wmo = p.get("wmoCollectiveId")
+        if wmo in seen:
+            continue
+        seen.add(wmo)
+        yield _get_json(p["@id"], timeout).get("productText", "") or ""
 
 
 # Alaska marine text is keyed by AWIPS *location*, which is not the issuing office:
@@ -230,7 +239,10 @@ def _latest_product_text(ptype, location, timeout):
 # live in OFF/AFG, and AFG's COASTAL zones (PKZ801-856) live in CWF under **WCZ** -- AFG
 # lists no CWF at all. The old default (`--location ALU`, CWF only) therefore returned
 # "zone not found in fetched ALU product" for every Arctic zone. Automation #37, 2026-08-12.
-AK_LOCATIONS = ["ALU", "WCZ", "AER", "AJK", "AFG"]
+# #65, 2026-11-17: CWF/AJK is the Southeast INSIDE waters only (PKZ011-036). The other Alaska
+# CWF locations the products API lists were missing here: AEG, YAK (Yakutat Bay, PKZ053) and
+# NSB (North Slope coastal, PKZ811-815 and PKZ857-861).
+AK_LOCATIONS = ["ALU", "WCZ", "AER", "AJK", "AEG", "YAK", "AFG", "NSB"]
 
 
 def fetch_latest_cwf(location, timeout, zone=None):
@@ -247,19 +259,18 @@ def fetch_latest_cwf(location, timeout, zone=None):
                 continue
             tried.append(key)
             try:
-                text = _latest_product_text(ptype, loc, timeout)
+                for text in _recent_product_texts(ptype, loc, timeout):
+                    if not text:
+                        continue
+                    last_text = last_text or text
+                    if zone is None or zone.upper() in text.upper():
+                        return text
             except Exception:
                 continue
-            if not text:
-                continue
-            last_text = last_text or text
-            if zone is None or zone.upper() in text.upper():
-                return text
     if zone is not None:
         raise RuntimeError(
             f"zone {zone} not found in any of: {', '.join(tried)} "
-            f"(the 15-85 nm Arctic zones PKZ857/858/859 are in NO api.weather.gov product -- "
-            f"pipe the nws-forecast MCP output in on stdin instead)")
+            f"(pipe the nws-forecast MCP output in on stdin instead)")
     if last_text:
         return last_text
     raise RuntimeError(f"no marine products listed for location {location}")
@@ -290,6 +301,7 @@ def main():
     ap.add_argument("--min-seas", type=float, default=6.0, help="flag only when seas >= this many ft (default 6)")
     ap.add_argument("--timeout", type=float, default=20.0, help="self-fetch network timeout, seconds (default 20)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--text", action="store_true", help="with --zone: also print the zone's forecast text, so a zone no lat/lon resolves to (PKZ641) can be pulled by name")
     args = ap.parse_args()
 
     def emit(periods, unparsed, note=None):
@@ -342,6 +354,8 @@ def main():
         if not zones:
             emit([], 0, note=f"zone {args.zone} not found in fetched {args.location} product — nothing to check")
             return
+        if args.text and not args.json:
+            print(zones[0]["text"].split("$$")[0].strip() + "\n")
 
     # --- extract periods across all zones ----------------------------------
     all_blocks = []

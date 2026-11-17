@@ -83,6 +83,9 @@ def clear_marker() -> None:
 
 def on_prompt(data: dict) -> None:
     prompt = data.get("prompt") or ""
+    # Sub-agent hand-backs arrive as prompt events and often mention "/daily" — not a user trigger.
+    if "<agent-message" in prompt or "Subagent hand-back" in prompt:
+        return
     if not DAILY_RE.search(prompt):
         return
     today = date.today().isoformat()

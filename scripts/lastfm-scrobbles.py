@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _secrets import load_secrets  # automation #42: secrets.env is the single store
 
 API = "https://ws.audioscrobbler.com/2.0/"
-UA = "llm-land-lastfm/1.0 (daily music stat; accounts@dmanda.com)"
+UA = "lastfm-daily-stat/1.0"  # generic on purpose: no name, project or contact address goes to an outside service (#66)
 PAGE_LIMIT = 200          # API max
 MAX_PAGES = 10            # 2000 scrobbles in a day would be extraordinary; bound it anyway
 

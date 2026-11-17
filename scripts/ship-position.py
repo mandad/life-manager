@@ -30,14 +30,31 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 CONF = Path(__file__).resolve().parent / ".ship-relay.conf"
+
+# Automation #59 (2026-09-26/28): cross-check the AIS nav status against actual displacement.
+# mfphub's status field LAGS the ship (user, 2026-09-28: "we always update the status right away
+# on the ship, but it doesn't seem to propagate to mfphub") — on 9/26 it broadcast "under way,
+# 10 kt" while the ship swung at anchor in Zachar Bay. Same stationary set as the plot room
+# (backend/app/services/mfphub.py _STATIONARY; frontend shipStatus.isStationaryStatus).
+FIX_CACHE = Path.home() / ".cache" / "llm-land" / "ship-fixes.json"
+STATIONARY_STATUS = {1, 5, 6}   # at anchor / moored / aground
+STILL_NM = 0.25                 # less than this over >= STILL_GAP_MIN = effectively stationary (anchor swing)
+MOVED_NM = 0.35                 # more than this = genuinely moved: beyond the ~0.3 nm max anchor-swing diameter
+MIN_GAP_MIN = 8                 # 10/12: two fixes 9 min apart moved 0.38 nm while AIS said "at anchor"
+STILL_GAP_MIN = 20              # a slow survey line can cover < STILL_NM in 8 min, so "stationary" needs the longer gap
+MAX_GAP_MIN = 240               # older baselines mislead: a transit then a mooring reads as "moored but moved"
+NOMINATIM = "https://nominatim.openstreetmap.org"
+UA = {"User-Agent": "llm-land-ship-position/1.1 (personal /daily routine)"}
 
 MFPHUB_URL = "https://mfphub.global/Ship/Read"  # public NOAA/UNOLS AIS feed, no auth
 MFPHUB_NAME = "FAIRWEATHER"
@@ -121,6 +138,156 @@ def fetch_mfphub(name=MFPHUB_NAME, mmsi=MFPHUB_MMSI, url=MFPHUB_URL):
     raise RuntimeError(f"ship '{name}' (MMSI {mmsi}) not in mfphub feed")
 
 
+def _parse_utc(iso):
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _nm(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    h = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 3440.065 * math.asin(math.sqrt(h))
+
+
+def cache_fix(data):
+    """Append this fix to the rolling cache (deduped by fix time; keeps the last 20). Never raises."""
+    try:
+        fixes = json.loads(FIX_CACHE.read_text()) if FIX_CACHE.exists() else []
+    except Exception:
+        fixes = []
+    row = {k: data.get(k) for k in ("utc", "lat", "lon", "heading", "nav_status_code", "nav_status", "sog_kt", "cog")}
+    if row["utc"] and row["lat"] is not None and not any(f.get("utc") == row["utc"] for f in fixes):
+        fixes.append(row)
+    fixes = sorted(fixes, key=lambda f: str(f.get("utc")))[-20:]
+    try:
+        FIX_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        FIX_CACHE.write_text(json.dumps(fixes, indent=1))
+    except OSError:
+        pass
+    return fixes
+
+
+def motion_check(data, fixes):
+    """Compare the AIS status with displacement since the newest cached fix >= MIN_GAP_MIN older.
+    Returns (verdict_code, sentence) — verdict in {agrees, status_lag_stationary, status_lag_moving,
+    no_baseline}."""
+    now_t, lat, lon = _parse_utc(data.get("utc")), data.get("lat"), data.get("lon")
+    if now_t is None or lat is None:
+        return "no_baseline", "no fix time — motion not checked"
+    prior, newest_gap = None, None
+    for f in reversed(fixes):
+        t = _parse_utc(f.get("utc"))
+        if not t:
+            continue
+        gap = (now_t - t).total_seconds() / 60
+        if gap > 0 and newest_gap is None:
+            newest_gap = gap
+        if MIN_GAP_MIN <= gap <= MAX_GAP_MIN:
+            prior = (f, t)
+            break
+    if not prior:
+        # Worded as the gap between THIS fix and the previous cached one; "cached fix is 19 h old"
+        # was read as "the ship hasn't reported for 19 h" (10/7, a sub-agent flagged a phantom stall).
+        why = (f"the previous cached fix is {newest_gap/60:.1f} h before this one (> {MAX_GAP_MIN/60:.0f} h)"
+               if newest_gap and newest_gap > MAX_GAP_MIN
+               else f"no earlier cached fix {MIN_GAP_MIN} min–{MAX_GAP_MIN/60:.0f} h before this one")
+        return "no_baseline", (f"{why} — motion not checked; this fix itself is current. "
+                               f"Re-run once AIS posts a newer fix (≥{MIN_GAP_MIN} min later)")
+    f, t = prior
+    mins = (now_t - t).total_seconds() / 60
+    dist = _nm(f["lat"], f["lon"], lat, lon)
+    smg = dist / (mins / 60) if mins else 0.0
+    code = data.get("nav_status_code")
+    status = data.get("nav_status") or "status unknown"
+    span = f"{dist:.2f} nm in {mins/60:.1f} h" if mins >= 90 else f"{dist:.2f} nm in {mins:.0f} min"
+    swing = ""
+    if f.get("heading") is not None and data.get("heading") is not None:
+        dh = abs((data["heading"] - f["heading"] + 180) % 360 - 180)
+        if dh >= 20 and dist < STILL_NM and (code in STATIONARY_STATUS or mins >= STILL_GAP_MIN):
+            swing = f", heading swung {dh:.0f}° (swinging on the hook)"
+    # #63: the same SOG, COG and heading on two different fixes, with far less ground covered than that
+    # SOG implies, is the provider repeating old kinematics. Holds at any gap >= MIN_GAP_MIN (10/23: 25 min).
+    sog = data.get("sog_kt")
+    if (sog and smg < 0.2 * sog
+            and all(f.get(k) is not None and f.get(k) == data.get(k) for k in ("sog_kt", "cog", "heading"))):
+        return ("status_lag_stationary",
+                f"⚠️ AIS says **{status}** at {sog} kt, but the ship moved only {span} (~{smg:.1f} kt made good) and "
+                f"SOG, COG and heading are identical to the previous fix → effectively STATIONARY (frozen AIS kinematics)")
+    if dist < STILL_NM and code not in STATIONARY_STATUS and mins >= STILL_GAP_MIN:
+        return ("status_lag_stationary",
+                f"⚠️ AIS says **{status}**, but the ship moved only {span}{swing} → effectively STATIONARY "
+                f"(at anchor / moored; mfphub status lag)")
+    if dist > MOVED_NM and code in STATIONARY_STATUS:
+        return ("status_lag_moving",
+                f"⚠️ AIS says **{status}**, but the ship moved {span} (~{smg:.1f} kt made good) → UNDER WAY "
+                f"(mfphub status lag)")
+    return "agrees", f"agrees with {status}: {span}" + (f" (~{smg:.1f} kt made good)" if dist >= STILL_NM else "") + swing
+
+
+def _get_json(path, params):
+    req = urllib.request.Request(f"{NOMINATIM}/{path}?" + urllib.parse.urlencode(params), headers=UA)
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode())
+
+
+def nearest_place(lat, lon):
+    """Two Nominatim calls (1.1 s apart, per its usage policy): the locality from a reverse lookup,
+    and the nearest named bay from a bounded search. Reverse alone returns only the borough at sea.
+    Returns a sentence or None; never raises."""
+    parts = []
+    try:
+        rev = _get_json("reverse", {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 14, "addressdetails": 1})
+        addr = rev.get("address") or {}
+        town = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("hamlet")
+        area = town or addr.get("county") or addr.get("state")
+        if area:
+            parts.append(f"in {town}" if town else f"in {area}")
+    except Exception:
+        pass
+    try:
+        time.sleep(1.1)
+        vb = f"{lon - 0.35},{lat + 0.2},{lon + 0.35},{lat - 0.2}"
+        # limit 40 (Nominatim's max): at 10 the nearest bay can fall outside the importance-ranked top
+        # hits, so the same fix read "Saint Herman Bay 0.4 nm" on one call and "Cook Bay 5.4 nm" on the next.
+        hits = _get_json("search", {"q": "bay", "viewbox": vb, "bounded": 1, "format": "jsonv2", "limit": 40})
+        bays = sorted((_nm(lat, lon, float(h["lat"]), float(h["lon"])), h.get("name")) for h in hits if h.get("name"))
+        if bays:
+            d, name = bays[0]
+            parts.append(f"nearest named bay **{name}** ({d:.1f} nm from its charted centre)")
+    except Exception:
+        pass
+    return " · ".join(parts) or None
+
+
+def publish_hub(data, verdict, place):
+    """Write the fix to the hub's dash/ship feed so every agent (and the dashboard) sees where the ship is
+    (user, 2026-10-15). Never breaks the script."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hub_hook", Path(__file__).resolve().parent / "hub-hook.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        # The motion check overrides mfphub's lagging nav status; say so, so the title doesn't read as a contradiction.
+        status = {"status_lag_stationary": f"stationary per motion check (AIS status lagging: {data.get('nav_status')})",
+                  "status_lag_moving": f"under way per motion check (AIS status lagging: {data.get('nav_status')})"}.get(
+            verdict, data.get("nav_status") or "status unknown")
+        lat, lon = data["lat"], data["lon"]
+        bits = [f"{lat:.4f}, {lon:.4f}"]
+        if verdict != "status_lag_stationary":
+            bits += [f"{k} {data[v]}{u}" for k, v, u in (("SOG", "sog_kt", " kt"), ("COG", "cog", "°")) if data.get(v) is not None]
+        if place:
+            bits.append(place.replace("**", ""))
+        row = {"title": f"Fairweather: {status}", "status": f"AIS {data.get('utc', '?')}", "detail": " · ".join(bits),
+               "url": f"https://www.google.com/maps?q={lat},{lon}", "source": "life-manager (ship-position.py)", "flag": False}
+        hook.rpc("memory_set", key="dash/ship", value=json.dumps({"items": [row]}, ensure_ascii=False))
+    except Exception as e:
+        print(f"(hub dash/ship not updated: {e})", file=sys.stderr)
+
+
 def age_str(iso):
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -145,7 +312,23 @@ def main():
     ap.add_argument("--until", help="history: ISO upper bound on utc")
     ap.add_argument("--limit", type=int, help="history: max rows (relay caps at 5000)")
     ap.add_argument("--csv", action="store_true", help="history: pass through CSV from the relay")
+    ap.add_argument("--no-place", action="store_true", help="skip the nearest-named-place lookup (Nominatim)")
+    ap.add_argument("--no-hub", action="store_true", help="don't publish the fix to the hub's dash/ship feed")
+    ap.add_argument("--self-test", action="store_true", help="run the motion-check self-test and exit")
     args = ap.parse_args()
+
+    if args.self_test:  # #63: the 10/23 case, plus a real 7 kt transit that must not be flagged
+        prev = {"utc": "2026-10-23T20:00:00Z", "lat": 60.0, "lon": -146.0, "heading": 298, "sog_kt": 7, "cog": 84,
+                "nav_status_code": 0, "nav_status": "under way"}
+        frozen = dict(prev, utc="2026-10-23T20:17:00Z", lat=60.001)  # 0.06 nm in 17 min (< STILL_GAP_MIN), same SOG/COG/heading
+        moving = dict(prev, utc="2026-10-23T20:17:00Z", lat=60.033)  # ~2 nm in 17 min = 7 kt made good
+        assert motion_check(frozen, [prev])[0] == "status_lag_stationary", motion_check(frozen, [prev])
+        assert "frozen AIS kinematics" in motion_check(frozen, [prev])[1]
+        assert motion_check(moving, [prev])[0] == "agrees", motion_check(moving, [prev])
+        old_row = {k: v for k, v in prev.items() if k not in ("sog_kt", "cog")}  # cache rows written before #63
+        assert motion_check(frozen, [old_row])[0] == "agrees", motion_check(frozen, [old_row])
+        print("self-test OK")
+        return
 
     if args.history and args.source == "mfphub":
         sys.exit("--history not available from mfphub (latest fix only); use the relay")
@@ -212,15 +395,30 @@ def main():
     if data is None:
         sys.exit("ship-position pull failed: " + ("; ".join(errs) or "no source available"))
 
+    # Motion cross-check against the fix cache (#59). Computed before caching this fix.
+    try:
+        prior_fixes = json.loads(FIX_CACHE.read_text()) if FIX_CACHE.exists() else []
+    except Exception:
+        prior_fixes = []
+    verdict, motion = motion_check(data, prior_fixes)
+    cache_fix(data)
+
     if args.latlon:
+        if not args.no_hub:
+            publish_hub(data, verdict, None)
         print(f"{data['lat']} {data['lon']}")
         return
 
+    place = None if args.no_place else nearest_place(data["lat"], data["lon"])
+    if not args.no_hub:
+        publish_hub(data, verdict, place)
     h, agetxt = age_str(data.get("utc", ""))
     stale = " ⚠️STALE" if (h is not None and h > args.max_age_h) else ""
     if args.json:
         data["_age_hours"] = round(h, 2) if h is not None else None
         data["_stale"] = bool(stale)
+        data["_motion"] = {"verdict": verdict, "text": motion}
+        data["_place"] = place
         print(json.dumps(data, indent=2))
         return
 
@@ -235,6 +433,9 @@ def main():
     src = data.get("_source", "relay (own GPS)")
     print(f"### Ship position (via {src})")
     print(f"- **{lat}, {lon}** — obs {agetxt}{stale}" + (f" · {' · '.join(bits)}" if bits else ""))
+    if place:
+        print(f"- near: {place}")
+    print(f"- motion check: {motion}")
     print(f"- feed to marine forecast: `nws_get_marine_forecast(lat={lat}, lon={lon})`")
     if stale:
         print(f"- _latest fix older than {args.max_age_h}h — pusher may be down / ship off-network; "

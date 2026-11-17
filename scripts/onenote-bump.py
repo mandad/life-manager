@@ -28,8 +28,16 @@ Usage
                     error (exit 1, nothing written), same as a missing --rows title.
   --days-static N   also rewrites a "(walked; unchanged since … — N days)" style
                     annotation's day count on CME-Relief-type cells (optional).
+  --check-tables    only run the table-integrity check below and exit (for /weekly hygiene).
 
-Exit codes: 0 ok · 1 a named row was not found (nothing written) · 2 file error.
+Table integrity (automation #60, 2026-10-06): before any write, both tables are checked for a
+row split across lines — a line starting with `|` that doesn't close with `|`, or any non-table
+line sitting between two table rows. The 9/30 run put bullets inside the FA All Hands watchlist
+cell; Obsidian broke the table there and the bump silently reached 5 of 6 watchlist cells. On a
+split row the script prints the row title + line range and exits 3 WITHOUT writing.
+
+Exit codes: 0 ok · 1 a named row was not found (nothing written) · 2 file error ·
+            3 a table row is split across lines (nothing written).
 """
 from __future__ import annotations
 
@@ -69,9 +77,45 @@ def row_title(cells: list[str]) -> str | None:
     return None
 
 
+TABLE_SECTIONS = ("## Active-page watchlist", "## Stored page hashes")
+
+
+def table_breaks(lines: list[str]) -> list[str]:
+    """Problems in the two state tables: a row opened with `|` but not closed on its line, or a
+    non-blank non-table line between the first and last table row of a section."""
+    problems: list[str] = []
+    for heading in TABLE_SECTIONS:
+        start = next((i for i, l in enumerate(lines) if l.startswith(heading)), None)
+        if start is None:
+            problems.append(f"section {heading!r} not found")
+            continue
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        rows = [i for i in range(start + 1, end) if lines[i].startswith("|")]
+        if not rows:
+            continue
+        last_title = "?"
+        for i in range(rows[0], rows[-1] + 1):
+            l = lines[i]
+            if l.startswith("|"):
+                cells = split_row(l)
+                if cells:
+                    last_title = row_title(cells) or last_title
+                elif not l.rstrip().endswith("|"):
+                    m = re.match(r"\|\s*(\*\*[^*]+\*\*|`[^`]+`\s*\|\s*[^|]+)", l)
+                    last_title = norm(m.group(1).split("|")[-1]) if m else last_title
+                    problems.append(f"{heading[3:]}: line {i + 1} opens a row that doesn't close "
+                                    f"on its line (row {last_title!r})")
+            elif l.strip():
+                problems.append(f"{heading[3:]}: line {i + 1} is inside the table but isn't a row "
+                                f"(after row {last_title!r}): {l.strip()[:60]!r}")
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--date", required=True, help="YYYY-MM-DD to write into the Last checked cell")
+    ap.add_argument("--date", help="YYYY-MM-DD to write into the Last checked cell")
+    ap.add_argument("--check-tables", action="store_true",
+                    help="only check both tables for rows split across lines, then exit (0 ok · 3 broken)")
     ap.add_argument("--rows", nargs="*", default=[], help="page titles to bump")
     ap.add_argument("--rows-file", help="file with one page title per line (# comments ok)")
     ap.add_argument("--all", action="store_true",
@@ -83,7 +127,19 @@ def main() -> int:
     ap.add_argument("--days-static", type=int, help="rewrite an 'N days' annotation on matched cells")
     args = ap.parse_args()
 
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+    if args.check_tables:
+        try:
+            chk_lines = Path(args.file).read_text(encoding="utf-8").split("\n")
+        except OSError as e:
+            print(f"ERROR: cannot read {args.file}: {e}")
+            return 2
+        probs = table_breaks(chk_lines)
+        for p in probs:
+            print(f"  TABLE BROKEN — {p}")
+        print("  tables OK" if not probs else f"  {len(probs)} table problem(s)")
+        return 3 if probs else 0
+
+    if not args.date or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
         print(f"ERROR: --date must be YYYY-MM-DD, got {args.date!r}")
         return 2
 
@@ -109,6 +165,10 @@ def main() -> int:
         except OSError as e:
             print(f"ERROR: cannot read --rows-file: {e}")
             return 2
+    if args.days_static is not None and len(wanted) != 1:
+        # same corruption as --all, via a multi-row --rows-file (2026-10-26: "~4 days diving" → "~108 days")
+        print("ERROR: --days-static is for exactly one named row (e.g. --rows \"CME Relief\").")
+        return 2
     path = Path(args.file)
     try:
         text = path.read_text(encoding="utf-8")
@@ -116,6 +176,13 @@ def main() -> int:
         print(f"ERROR: cannot read {path}: {e}")
         return 2
     lines = text.split("\n")
+
+    probs = table_breaks(lines)
+    if probs:
+        for p in probs:
+            print(f"  TABLE BROKEN — {p}")
+        print("  → nothing written: re-join the split row(s) onto one line first (Edit, ` · ` separators).")
+        return 3
 
     excluded: list[str] = []
     if args.all:
@@ -179,6 +246,11 @@ def main() -> int:
     if args.all:
         print(f"  --all: {len(wanted_norm)} hash-table titles named · excluded ({len(excluded)}): "
               + (", ".join(repr(t) for t in excluded) or "none"))
+        watch = [row_title(c) for c in (split_row(l) for l in lines)
+                 if c and c[0].strip().startswith("**")]
+        reach = sum(1 for t in watch if t in wanted_norm)
+        print(f"  watchlist rows: {len(watch)} in table · {reach} reached by this bump "
+              f"(the rest are excluded or watchlist-only titles)")
     for t, old, new in changed:
         print(f"  bump   {t!r}: {old} → {new}")
     for t, why in skipped:

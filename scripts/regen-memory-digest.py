@@ -77,6 +77,9 @@ def load_entries(memory_dir: Path) -> list[dict]:
     return entries
 
 
+INDEX_HOOK_MAX = 110  # characters of description shown per MEMORY.md line
+
+
 def write_memory_index(entries: list[dict], memory_dir: Path) -> None:
     lines = ["# Memory index", ""]
     by_type: dict[str, list[dict]] = {}
@@ -85,7 +88,12 @@ def write_memory_index(entries: list[dict], memory_dir: Path) -> None:
     # Flat index (kept compact — 1 line per entry, max 200 lines per CLAUDE.md guidance)
     for t in TYPE_ORDER + sorted(set(by_type) - set(TYPE_ORDER)):
         for e in by_type.get(t, []):
-            lines.append(f"- [{e['name']}]({e['file']}) — {e['description']}")
+            # The index has a read limit (~24 KB); the full description stays in the
+            # memory file and in Memory digest.md, so the index hook is cut at a word.
+            d = e["description"].strip('"')
+            if len(d) > INDEX_HOOK_MAX:
+                d = d[:INDEX_HOOK_MAX].rsplit(" ", 1)[0].rstrip(" ,;:—-(") + "…"
+            lines.append(f"- [{e['name']}]({e['file']}) — {d}")
     (memory_dir / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

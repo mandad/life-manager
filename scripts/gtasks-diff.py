@@ -21,7 +21,8 @@ Usage
 Credentials: GOOGLE_TASKS_CLIENT_ID / _SECRET via scripts/_secrets.py (secrets.env);
 token cache at GOOGLE_TASKS_TOKEN_PATH (default ~/.config/llm-land-mcp/google-tasks-token.json),
 refreshed in place when near expiry. No token value is ever printed.
-Exit: 0 ok · 1 auth/API failure (message printed, safe to fall back to the MCP) · 2 file error.
+Exit: 0 ok · 1 auth/API failure (message printed, safe to fall back to the MCP) · 2 file error ·
+3 the pull looks like a different Google account (#64): nothing diffed, no snapshot written.
 """
 from __future__ import annotations
 
@@ -139,13 +140,50 @@ def fmt(t: dict) -> str:
     return f"{t['title']} ({t['due'] or 'undated'})"
 
 
+def account_mismatch(prev_tasks: list[dict], tasks: list[dict]) -> str | None:
+    """Why today's pull looks like a different Google account, or None (#64).
+
+    On 2026-10-29 a re-auth landed on a personal account: the token was valid, every work task
+    read as GONE (= completed, by the diff's contract), and that snapshot would have become the
+    next day's baseline. Two tells: none of yesterday's list names came back, or 80% or more of
+    yesterday's task ids vanished at once."""
+    if not prev_tasks:
+        return None
+    prev_lists = sorted({t.get("list", "") for t in prev_tasks})
+    now_lists = sorted({t.get("list", "") for t in tasks})
+    if not set(prev_lists) & set(now_lists):
+        return f"previous lists {prev_lists}, now {now_lists}"
+    now_ids = {t["id"] for t in tasks}
+    gone = sum(1 for t in prev_tasks if t["id"] not in now_ids)
+    if len(prev_tasks) >= 5 and gone >= 0.8 * len(prev_tasks):
+        return f"{gone} of {len(prev_tasks)} previous tasks gone at once (lists now {now_lists})"
+    return None
+
+
+def self_test() -> int:
+    work = [{"id": f"w{i}", "list": "Work list", "title": f"t{i}", "due": None} for i in range(15)]
+    personal = [{"id": "p1", "list": "My Tasks", "title": "x", "due": None}]
+    assert account_mismatch(work, personal), "different lists must be flagged"
+    assert account_mismatch(work, []), "an empty pull against 15 tasks must be flagged"
+    assert account_mismatch(work, work[:2]), "13 of 15 gone at once must be flagged"
+    assert account_mismatch(work, work[:12] + [{"id": "n1", "list": "Work list", "title": "new", "due": None}]) is None
+    assert account_mismatch([], personal) is None, "a first snapshot has nothing to compare"
+    assert account_mismatch(work[:3], work[:1]) is None, "small lists may clear normally"
+    print("self-test OK")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--date", default=dt.date.today().isoformat(), help="snapshot date (default today)")
     ap.add_argument("--horizon", type=int, default=7, help="days ahead for the 'next N days' bucket")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-snapshot", action="store_true", help="don't write today's snapshot file")
+    ap.add_argument("--force", action="store_true", help="diff and snapshot even when the pull looks like a different account")
+    ap.add_argument("--self-test", action="store_true", help="run the account-mismatch self-test and exit")
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
     today = dt.date.fromisoformat(args.date)
 
     try:
@@ -157,6 +195,11 @@ def main() -> int:
 
     prev = previous_snapshot(args.date)
     prev_date, prev_tasks = prev if prev else (None, [])
+    why = None if args.force else account_mismatch(prev_tasks, tasks)
+    if why:  # #64: no diff and no snapshot, so GONE is never read as completions off the wrong account
+        print(f"GTASKS-DIFF: ⚠️ ACCOUNT/LIST MISMATCH vs {prev_date} — {why}. Snapshot NOT written. "
+              f"Re-auth on the right account ({REAUTH}), or re-run with --force if the list really was cleared.")
+        return 3
     prev_by_id = {t["id"]: t for t in prev_tasks}
     now_by_id = {t["id"]: t for t in tasks}
 
