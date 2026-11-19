@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ODS = Path(
     "/mnt/c/Users/damia/OneDrive/Documents/NOAA Corps/FA CO/FY26 FA DRAFT Sailing Schedule.ods"
 )
-DEFAULT_OUT = ROOT / "AI Scratchpad/Projects/Fairweather Command/FY26 Sailing Schedule.md"
+# FY26 ended 2026-09-30; the doc was archived 2026-11-18, so a re-run lands in the archive.
+DEFAULT_OUT = ROOT / "AI Scratchpad/Archive/Projects/Fairweather Command/FY26 Sailing Schedule.md"
 DEPLOY_CUTOFF = dt.date(2026, 5, 1)  # legs on/after this go in the deployment-season table
 
 # Columns in the schedule grid (0-indexed).
